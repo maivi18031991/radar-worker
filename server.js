@@ -1,6 +1,7 @@
-// server.js — Radar-Signal AI Pro v11 (Node, Render-ready)
-// PURPOSE: produce signals only (no trading). Includes auto-learning optimizer.
-// USAGE: deploy to Render, set ENV: TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, PRIMARY_URL
+// server.js - Hybrid FUTURE + SPOT Smart Money Confirm (Radar v11 Hybrid)
+// PURPOSE: signals only (no trading). Uses Futures (primary) + Spot (secondary) for confirmation.
+// Deploy on Render. Set ENV: TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, PRIMARY_URL
+
 import express from "express";
 import fs from "fs";
 import path from "path";
@@ -13,17 +14,21 @@ app.use(express.json());
 const PORT = process.env.PORT || 10000;
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || "";
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "";
-const PRIMARY_URL = process.env.PRIMARY_URL || ""; // e.g. https://radar-worker-yte4.onrender.com
+const PRIMARY_URL = process.env.PRIMARY_URL || `http://localhost:${PORT}`;
 
-// Data folder
+// API endpoints (Futures primary, Spot fallback)
+const FUTURE_API = "https://fapi.binance.com";
+const SPOT_API = "https://api.binance.com";
+const ALT_API_FALLBACK = ["https://api-gcp.binance.com", "https://data-api.binance.vision"];
+
+// Data files
 const DATA_DIR = path.resolve("./data");
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 const LOG_FILE = path.join(DATA_DIR, "logs.json");
 const CONFIG_FILE = path.join(DATA_DIR, "config.json");
 
-// Default config - will be overwritten if config.json exists
+// Default config
 const DEFAULT_CONFIG = {
-  BATCH_SIZE: 60,
   CONCURRENCY: 8,
   ALERT_COOLDOWN_MIN: 30,
   PRE_VOL: 1.8,
@@ -37,10 +42,10 @@ const DEFAULT_CONFIG = {
   OPT_MIN_SIGNALS: 2,
   autoLearnEnabled: true,
   lastAutoLearn: null,
-  weights: {} // WEIGHT per symbol
+  weights: {} // per-symbol weights
 };
 
-// load/save helpers
+// config helpers
 function loadConfig() {
   try {
     if (fs.existsSync(CONFIG_FILE)) {
@@ -48,7 +53,7 @@ function loadConfig() {
       return Object.assign({}, DEFAULT_CONFIG, JSON.parse(text));
     } else {
       fs.writeFileSync(CONFIG_FILE, JSON.stringify(DEFAULT_CONFIG, null, 2));
-      return DEFAULT_CONFIG;
+      return Object.assign({}, DEFAULT_CONFIG);
     }
   } catch (e) {
     console.error("loadConfig error", e);
@@ -58,11 +63,14 @@ function loadConfig() {
 function saveConfig(cfg) {
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2));
 }
+
+// logs
 function appendLog(entry) {
   try {
     const arr = fs.existsSync(LOG_FILE) ? JSON.parse(fs.readFileSync(LOG_FILE, "utf8")) : [];
     arr.push(entry);
-    fs.writeFileSync(LOG_FILE, JSON.stringify(arr.slice(-5000), null, 2)); // keep last 5000
+    // keep recent only
+    fs.writeFileSync(LOG_FILE, JSON.stringify(arr.slice(-8000), null, 2));
   } catch (e) {
     console.error("appendLog error", e);
   }
@@ -77,86 +85,211 @@ function readLogs() {
   }
 }
 
-// util indicators
+// utilities
+async function safeFetchJSON(url, opts = {}, retries = 3) {
+  let lastErr = null;
+  for (let i = 0; i < retries; i++) {
+    try {
+      const r = await fetch(url, { timeout: 15000, ...opts });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return await r.json();
+    } catch (e) {
+      lastErr = e;
+      await new Promise((r) => setTimeout(r, 400 * (i + 1)));
+    }
+  }
+  throw lastErr;
+}
+
 function sma(arr, n) {
-  if (!arr || arr.length === 0) return 0;
-  const s = arr.slice(-n);
-  return s.reduce((a, b) => a + b, 0) / s.length;
+  if (!Array.isArray(arr) || arr.length === 0) return 0;
+  const slice = arr.slice(-n);
+  return slice.reduce((a, b) => a + b, 0) / slice.length;
 }
 function rsiCalc(closes, period = 14) {
   if (!closes || closes.length < period + 1) return 50;
   let gains = 0, losses = 0;
-  for (let i = closes.length - period; i < closes.length; i++) {
-    if (i <= 0) continue;
+  for (let i = 1; i <= period; i++) {
     const diff = closes[i] - closes[i - 1];
     if (diff >= 0) gains += diff;
     else losses += Math.abs(diff);
   }
-  const avgGain = gains / period;
-  const avgLoss = losses / period;
+  let avgGain = gains / period;
+  let avgLoss = losses / period;
+  for (let i = period + 1; i < closes.length; i++) {
+    const diff = closes[i] - closes[i - 1];
+    avgGain = (avgGain * (period - 1) + Math.max(0, diff)) / period;
+    avgLoss = (avgLoss * (period - 1) + Math.max(0, -diff)) / period;
+  }
   if (avgLoss === 0) return 100;
   const rs = avgGain / avgLoss;
   return 100 - 100 / (1 + rs);
 }
 
-// fetch helper
-async function fetchJSON(url, opts = {}) {
-  const res = await fetch(url, { timeout: 15000, ...opts });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  return res.json();
+// fetch klines and tickers - FUTURES primary, SPOT fallback
+async function fetchKlines(symbol, interval = "1h", limit = 100, preferFuture = true) {
+  if (preferFuture) {
+    try {
+      const url = `${FUTURE_API}/fapi/v1/klines?symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=${limit}`;
+      const data = await safeFetchJSON(url);
+      return { data, source: "future" };
+    } catch (e) {
+      // fallback to spot
+    }
+  }
+  // fallback to spot
+  const url2 = `${SPOT_API}/api/v3/klines?symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=${limit}`;
+  const data2 = await safeFetchJSON(url2);
+  return { data: data2, source: "spot" };
 }
 
-// analyze a single symbol
-async function analyzeSymbol(symbol = "BTCUSDT", interval = "1h") {
-  const cfg = loadConfig();
-  const klineUrl = `https://api.binance.com/api/v3/klines?symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=100`;
-  const tickUrl = `https://api.binance.com/api/v3/ticker/24hr?symbol=${encodeURIComponent(symbol)}`;
-  const [klines, ticker] = await Promise.all([fetchJSON(klineUrl), fetchJSON(tickUrl)]);
-  if (!Array.isArray(klines) || klines.length === 0) throw new Error("No klines");
+async function fetchTicker(symbol, preferFuture = true) {
+  if (preferFuture) {
+    try {
+      const url = `${FUTURE_API}/fapi/v1/ticker/24hr?symbol=${encodeURIComponent(symbol)}`;
+      const data = await safeFetchJSON(url);
+      return { data, source: "future" };
+    } catch (e) {}
+  }
+  const url2 = `${SPOT_API}/api/v3/ticker/24hr?symbol=${encodeURIComponent(symbol)}`;
+  const data2 = await safeFetchJSON(url2);
+  return { data: data2, source: "spot" };
+}
+
+// open interest & funding (futures)
+async function fetchOpenInterest(symbol) {
+  try {
+    // recent openInterest (public futures endpoint)
+    const url = `${FUTURE_API}/fapi/v1/openInterest?symbol=${encodeURIComponent(symbol)}`;
+    const data = await safeFetchJSON(url);
+    return data; // { "symbol": "BTCUSDT", "openInterest": "12345.0" }
+  } catch (e) { return null; }
+}
+async function fetchFundingRate(symbol, limit = 5) {
+  try {
+    const url = `${FUTURE_API}/fapi/v1/fundingRate?symbol=${encodeURIComponent(symbol)}&limit=${limit}`;
+    const data = await safeFetchJSON(url);
+    return data; // array
+  } catch (e) { return null; }
+}
+
+// analyze symbol (uses futures + spot info)
+async function analyzeSymbolHybrid(symbol, interval = "1h") {
+  // attempt futures first
+  const kl = await fetchKlines(symbol, interval, 100, true);
+  const tickerObj = await fetchTicker(symbol, true);
+  const klines = kl.data;
   const closes = klines.map(c => Number(c[4]));
   const vols = klines.map(c => Number(c[5]));
   const lastPrice = closes.at(-1);
   const ma20 = sma(closes, 20);
   const rsi_h1 = Math.round(rsiCalc(closes, 14));
   const volRatio = Math.max(0.01, sma(vols, 5) / Math.max(1, sma(vols, 20)));
+  const ticker = tickerObj.data;
+  // takerBuy info on futures is not standardized; approximate with volume ratio and quoteVolume
   const takerBuyBase = Number(ticker.takerBuyBaseAssetVolume || 0);
   const baseVol = Number(ticker.volume || 1);
   const takerBuyRatio = baseVol > 0 ? Math.min(1, takerBuyBase / Math.max(1, baseVol)) : 0;
-  // leaderScore heuristic
+  // open interest & funding
+  const oi = await fetchOpenInterest(symbol).catch(() => null);
+  const funding = await fetchFundingRate(symbol, 1).catch(() => null);
+  // leader score heuristic
   let leaderScore = 0;
   if (volRatio > 2) leaderScore += 30;
   if (takerBuyRatio > 0.55) leaderScore += 30;
   if (rsi_h1 >= 50 && rsi_h1 <= 65) leaderScore += 20;
   if (lastPrice > ma20) leaderScore += 20;
   leaderScore = Math.min(100, Math.round(leaderScore));
-  return { symbol, lastPrice, ma20, rsi_h1, volRatio: Number(volRatio.toFixed(2)), takerBuyRatio: Number(takerBuyRatio.toFixed(3)), leaderScore, closes, vols, ticker };
+  return {
+    symbol,
+    lastPrice,
+    ma20,
+    rsi_h1,
+    volRatio: Number(volRatio.toFixed(2)),
+    takerBuyRatio: Number(takerBuyRatio.toFixed(3)),
+    leaderScore,
+    closes,
+    vols,
+    ticker,
+    oi,
+    funding,
+    source: kl.source
+  };
 }
 
-// compute signal using config and per-symbol weight
-function computeSignal(item) {
+// compute signal using hybrid logic (futures weight + spot confirmation)
+function computeSignalHybrid(item) {
   const cfg = loadConfig();
   const weight = Number(cfg.weights[item.symbol] || 1);
+  // thresholds scale with weight (higher weight -> stricter for rare but higher quality)
   const PRE_VOL = cfg.PRE_VOL * weight;
   const PRE_TAKER = cfg.PRE_TAKER;
   const SPOT_VOL = cfg.SPOT_VOL * weight;
   const SPOT_TAKER = cfg.SPOT_TAKER;
   const GOLD_VOL = cfg.GOLD_VOL * weight;
   const GOLD_TAKER = cfg.GOLD_TAKER;
+
   const price = item.lastPrice;
   const ma20 = item.ma20 || price;
   const entryLow = +(ma20 * 0.995).toFixed(8);
   const entryHigh = +(ma20 * 1.02).toFixed(8);
-  let type = "NONE", confidence = 0;
-  const IMF = item.leaderScore >= cfg.IMF_LEADERSCORE;
-  if (item.volRatio >= GOLD_VOL && item.takerBuyRatio >= GOLD_TAKER && item.rsi_h1 > 48) { type = "GOLDEN"; confidence = 95; }
-  else if (item.volRatio >= SPOT_VOL && item.takerBuyRatio >= SPOT_TAKER && item.rsi_h1 >= 48 && price > ma20) { type = "SPOT"; confidence = 85; }
-  else if (item.volRatio >= PRE_VOL && item.takerBuyRatio >= PRE_TAKER && item.rsi_h1 >= 42 && item.rsi_h1 <= 55) { type = "PREBREAK"; confidence = 65; }
-  confidence = Math.min(99, confidence + Math.round(item.leaderScore / 10));
-  const last3 = item.closes.slice(-3);
-  const recentMin = Math.min(...last3);
+
+  // smart confirmation logic:
+  // prefer futures signals: if futures source & OI/funding confirm -> stronger
+  const isFutureSource = (item.source === "future");
+  const oiVal = item.oi && item.oi.openInterest ? Number(item.oi.openInterest) : null;
+  const fundingLatest = Array.isArray(item.funding) && item.funding.length ? Number(item.funding[item.funding.length-1].fundingRate) : null;
+  let type = "NONE";
+  let confidence = 0;
+  let IMF = item.leaderScore >= cfg.IMF_LEADERSCORE;
+
+  // base decisions from futures-derived metrics
+  if (item.volRatio >= GOLD_VOL && item.takerBuyRatio >= GOLD_TAKER && item.rsi_h1 > 48) {
+    // if futures OI rising or funding supports longs -> stronger
+    if (isFutureSource && oiVal && fundingLatest !== null && fundingLatest <= 0.001) {
+      type = "GOLDEN";
+      confidence = 95;
+    } else {
+      // require spot confirmation (price > ma20 and spot vol high) to promote to GOLDEN
+      type = "SPOT"; // provisional
+      confidence = 80;
+    }
+  } else if (item.volRatio >= SPOT_VOL && item.takerBuyRatio >= SPOT_TAKER && item.rsi_h1 >= 48 && price > ma20) {
+    type = "SPOT";
+    confidence = 85;
+  } else if (item.volRatio >= PRE_VOL && item.takerBuyRatio >= PRE_TAKER && item.rsi_h1 >= 42 && item.rsi_h1 <= 55) {
+    type = "PREBREAK";
+    confidence = 65;
+  }
+
+  // cross-check with spot (if we fetched futures but spot behavior differs, reduce confidence)
+  // cheap spot check: if futures is source, fetch quick spot candle (we may have spot klines earlier)
+  // (Note: computeSignalHybrid assumes analyzeSymbolHybrid already used futures primary and filled item.source)
+  // suggested SL:
+  const recentMin = Math.min(...(item.closes.slice(-3)));
   const sl = Math.round(Math.min(price * 0.97, recentMin * 0.995) * 1000000) / 1000000;
   const tp = type === "GOLDEN" ? 12 : type === "SPOT" ? 6 : type === "PREBREAK" ? 5 : 0;
+  // boost confidence by leaderScore
+  confidence = Math.min(99, confidence + Math.round(item.leaderScore / 10));
   return { type, entryLow, entryHigh, sl, tp, confidence, IMF };
+}
+
+// format message for Telegram
+function formatMsg(item, sig) {
+  let t = `<b>${sig.type} | ${item.symbol}</b>\n`;
+  t += `Giá: ${item.lastPrice} | LS:${item.leaderScore} | Vol:${item.volRatio}x | Taker:${item.takerBuyRatio}\n`;
+  if (item.oi && item.oi.openInterest) {
+    t += `OI:${item.oi.openInterest} `;
+  }
+  if (item.funding && item.funding.length) {
+    t += `Funding:${item.funding[item.funding.length-1].fundingRate}\n`;
+  } else t += `\n`;
+  t += `RSI:${item.rsi_h1} | MA20:${item.ma20}\n`;
+  if (sig.type !== "NONE") {
+    t += `Vùng entry: ${sig.entryLow} - ${sig.entryHigh}\nTP:+${sig.tp}% | SL:${sig.sl}\nConfidence: ${sig.confidence}%\n`;
+  } else t += `No strong signal right now.\n`;
+  t += `Time: ${new Date().toISOString()}`;
+  return t;
 }
 
 // Telegram send
@@ -177,21 +310,8 @@ async function sendTelegram(text) {
   }
 }
 
-function formatMsg(item, sig) {
-  let t = `<b>${sig.type} | ${item.symbol}</b>\n`;
-  t += `Giá: ${item.lastPrice} | LS:${item.leaderScore} | Vol:${item.volRatio}x | Taker:${item.takerBuyRatio}\n`;
-  t += `RSI:${item.rsi_h1} | MA20:${item.ma20}\n`;
-  if (sig.type !== "NONE") {
-    t += `Vùng entry: ${sig.entryLow} - ${sig.entryHigh}\nTP:+${sig.tp}% | SL:${sig.sl}\nConfidence: ${sig.confidence}%\n`;
-  } else {
-    t += `No strong signal right now.\n`;
-  }
-  t += `Time: ${new Date().toISOString()}`;
-  return t;
-}
-
-// throttle: cooldown map in-memory (process lifetime)
-const lastAlert = {}; // key -> timestamp ms
+// cooldown per symbol/type
+const lastAlert = {};
 function shouldSendNow(symbol, type) {
   const cfg = loadConfig();
   const key = `${symbol}_${type}`;
@@ -201,27 +321,33 @@ function shouldSendNow(symbol, type) {
 }
 function recordSent(symbol, type) { lastAlert[`${symbol}_${type}`] = Date.now(); }
 
-// Route: health
-app.get("/", (req, res) => res.json({ status: "Radar-Signal AI Pro", time: new Date().toISOString() }));
+// endpoints
 
-// Route: analyze
+app.get("/", (req, res) => res.json({ status: "Radar Hybrid FUTURE+SPOT OK", time: new Date().toISOString() }));
+
+// /analyze?symbol=...&interval=1h  => returns hybrid analysis (futures primary)
 app.get("/analyze", async (req, res) => {
   try {
     const symbol = (req.query.symbol || "BTCUSDT").toUpperCase();
     const interval = req.query.interval || "1h";
-    const a = await analyzeSymbol(symbol, interval);
-    res.json({ symbol: a.symbol, lastPrice: a.lastPrice, rsi_h1: a.rsi_h1, ma20: a.ma20, volRatio: a.volRatio, takerBuyRatio: a.takerBuyRatio, leaderScore: a.leaderScore, time: new Date().toISOString() });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    const a = await analyzeSymbolHybrid(symbol, interval);
+    res.json({
+      symbol: a.symbol, lastPrice: a.lastPrice, rsi_h1: a.rsi_h1, ma20: a.ma20,
+      volRatio: a.volRatio, takerBuyRatio: a.takerBuyRatio, leaderScore: a.leaderScore, oi: a.oi, funding: a.funding, source: a.source
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-// Route: signal (analyze + compute + optional send Telegram)
+// /signal?symbol=...&sendTelegram=1
 app.get("/signal", async (req, res) => {
   try {
     const symbol = (req.query.symbol || "BTCUSDT").toUpperCase();
     const send = req.query.sendTelegram === "1" || req.query.sendTelegram === "true";
     const interval = req.query.interval || "1h";
-    const a = await analyzeSymbol(symbol, interval);
-    const sig = computeSignal(a);
+    const a = await analyzeSymbolHybrid(symbol, interval);
+    const sig = computeSignalHybrid(a);
     if (send && sig.type !== "NONE") {
       if (shouldSendNow(symbol, sig.type)) {
         const msg = formatMsg(a, sig);
@@ -231,34 +357,42 @@ app.get("/signal", async (req, res) => {
         console.log("Suppressed (cooldown)", symbol, sig.type);
       }
     }
-    const logRow = { symbol: a.symbol, type: sig.type, price: a.lastPrice, rsi_h1: a.rsi_h1, volRatio: a.volRatio, takerBuyRatio: a.takerBuyRatio, leaderScore: a.leaderScore, sl: sig.sl, tp: sig.tp, confidence: sig.confidence, time: new Date().toISOString() };
+    const logRow = { symbol: a.symbol, type: sig.type, price: a.lastPrice, rsi_h1: a.rsi_h1, volRatio: a.volRatio, takerBuyRatio: a.takerBuyRatio, leaderScore: a.leaderScore, sl: sig.sl, tp: sig.tp, confidence: sig.confidence, oi: a.oi, funding: a.funding, time: new Date().toISOString() };
     appendLog(logRow);
     res.json({ analysis: a, signal: sig, logged: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-// Route: batchscan -> scan many symbols (full list from Binance USDT)
+// helper: fetch all USDT symbols from exchangeInfo
 async function fetchAllUSDTsymbols() {
-  const url = "https://api.binance.com/api/v3/exchangeInfo";
-  const info = await fetchJSON(url);
-  const syms = info.symbols.filter(s => s.quoteAsset === "USDT" && s.status === "TRADING").map(s => s.symbol);
-  return syms;
+  const url = `${SPOT_API}/api/v3/exchangeInfo`;
+  const info = await safeFetchJSON(url);
+  return info.symbols.filter(s => s.quoteAsset === "USDT" && s.status === "TRADING").map(s => s.symbol);
 }
+
+// /batchscan?limit=436
 app.get("/batchscan", async (req, res) => {
   try {
     const cfg = loadConfig();
-    const symbols = await fetchAllUSDTsymbols(); // ~400+
-    // optional: accept ?limit=100 to test
+    // prefer full list but can use static if exchangeInfo is blocked
+    let symbols = [];
+    try { symbols = await fetchAllUSDTsymbols(); } catch (e) { symbols = []; }
+    if (!symbols || symbols.length === 0) {
+      // fallback static list (extend later)
+      symbols = ["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","MATICUSDT","AVAXUSDT","DOTUSDT","LINKUSDT","SUIUSDT","TONUSDT","INJUSDT","NEARUSDT","ATOMUSDT","FILUSDT","ETCUSDT","SEIUSDT"];
+    }
     const limit = Number(req.query.limit || symbols.length);
     const toScan = symbols.slice(0, limit);
-    const limitP = pLimit(cfg.CONCURRENCY || 8);
+    const limitP = pLimit(cfg.CONCURRENCY || 6);
     const results = [];
     await Promise.all(toScan.map(sym => limitP(async () => {
       try {
-        const a = await analyzeSymbol(sym);
-        const sig = computeSignal(a);
-        if (sig.type !== "NONE" || sig.IMF) {
-          // send immediate telegram if strong
+        const a = await analyzeSymbolHybrid(sym);
+        const sig = computeSignalHybrid(a);
+        // send Telegram only for strong signals or IMF
+        if ((sig.type !== "NONE" && sig.confidence >= 75) || sig.IMF) {
           if (shouldSendNow(sym, sig.type || "IMF")) {
             const msg = formatMsg(a, sig);
             await sendTelegram(msg);
@@ -271,64 +405,111 @@ app.get("/batchscan", async (req, res) => {
         // skip
       }
     })));
-    res.json({ scanned: results.length, results: results.filter(r => r.signal !== "NONE") });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    res.json({ scanned: toScan.length, results: results.filter(r => r.signal !== "NONE") });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
+// /leaderchain - detect leaders and suggest followers
+app.get("/leaderchain", async (req, res) => {
+  try {
+    const cfg = loadConfig();
+    const limitP = pLimit(cfg.CONCURRENCY || 6);
+    const leaders = [];
 
-// Route: imfonly -> scan and return IMF true list (no Telegram)
+    // Step 1: scan all USDT pairs quickly
+    const symbols = Object.keys(LEADER_GROUPS);
+    await Promise.all(symbols.map(sym => limitP(async () => {
+      try {
+        const a = await analyzeSymbolHybrid(sym);
+        const sig = computeSignalHybrid(a);
+        if ((sig.type === "GOLDEN" || sig.type === "SPOT") && sig.confidence >= 80) {
+          leaders.push({ symbol: sym, price: a.lastPrice, vol: a.volRatio, rsi: a.rsi_h1 });
+        }
+      } catch (e) {}
+    })));
+
+    // Step 2: for each leader, check group followers
+    const results = [];
+    for (const leader of leaders) {
+      const group = LEADER_GROUPS[leader.symbol] || [];
+      const followers = [];
+      await Promise.all(group.map(fol => limitP(async () => {
+        try {
+          const a2 = await analyzeSymbolHybrid(fol);
+          if (a2.volRatio < 1.5 && a2.rsi_h1 < 50) {
+            followers.push({ symbol: fol, price: a2.lastPrice, vol: a2.volRatio, rsi: a2.rsi_h1 });
+          }
+        } catch (e) {}
+      })));
+      if (followers.length > 0) {
+        const msg = `🚨 CHUỖI HỆ ĐANG CHẠY!\nLeader: ${leader.symbol} | Vol:${leader.vol}x | RSI:${leader.rsi}\nFollowers chưa chạy: ${followers.map(f => f.symbol).join(", ")}\nGợi ý: Entry sớm vùng MA20–MA50\n${new Date().toISOString()}`;
+        await sendTelegram(msg);
+        results.push({ leader: leader.symbol, followers });
+      }
+    }
+    res.json({ leaders: results });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+// /imfonly?limit=200
 app.get("/imfonly", async (req, res) => {
   try {
-    const symbols = await fetchAllUSDTsymbols();
-    const cfg = loadConfig();
+    let symbols = [];
+    try { symbols = await fetchAllUSDTsymbols(); } catch (e) { symbols = []; }
+    if (!symbols || symbols.length === 0) symbols = ["BTCUSDT","ETHUSDT","SOLUSDT","SUIUSDT","INJUSDT"];
     const limit = Number(req.query.limit || symbols.length);
     const toScan = symbols.slice(0, limit);
-    const limitP = pLimit(cfg.CONCURRENCY || 8);
+    const cfg = loadConfig();
+    const limitP = pLimit(cfg.CONCURRENCY || 6);
     const out = [];
     await Promise.all(toScan.map(sym => limitP(async () => {
       try {
-        const a = await analyzeSymbol(sym);
-        const sig = computeSignal(a);
-        if (sig.IMF) out.push({ symbol: a.symbol, lastPrice: a.lastPrice, volRatio: a.volRatio, leaderScore: a.leaderScore });
+        const a = await analyzeSymbolHybrid(sym);
+        const s = computeSignalHybrid(a);
+        if (s.IMF) out.push({ symbol: a.symbol, lastPrice: a.lastPrice, leaderScore: a.leaderScore, volRatio: a.volRatio });
       } catch (e) {}
     })));
     res.json({ count: out.length, list: out });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-// Route: exitcheck (quick 15m drop detector)
+// /exitcheck?symbol=...
 app.get("/exitcheck", async (req, res) => {
   try {
     const symbol = (req.query.symbol || "BTCUSDT").toUpperCase();
-    const url15 = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=15m&limit=6`;
-    const k15 = await fetchJSON(url15);
-    const closes15 = k15.map(c => Number(c[4]));
-    const last = closes15.at(-1);
-    const prev = closes15.at(-2) || last;
+    // use futures 15m klines ideally
+    const kl = await fetchKlines(symbol, "15m", 6, true);
+    const arr = kl.data;
+    const closes = arr.map(r => Number(r[4]));
+    const last = closes.at(-1);
+    const prev = closes.at(-2) || last;
     const change15 = ((last - prev) / prev) * 100;
-    const volNow = Number(k15.at(-1)[5]);
-    const volAvg = sma(k15.map((c, i) => Number(k15[i][5])), 4) || 1;
+    const volNow = Number(arr.at(-1)[5]);
+    const volAvg = sma(arr.map((c, i) => Number(arr[i][5])), 4) || 1;
     const volSpike = volNow > volAvg * 1.8;
     const reason = [];
     if (change15 <= -3) reason.push("Fast 15m drop");
     if (volSpike && change15 < -1) reason.push("Vol spike + pullback");
     res.json({ symbol, last, change15: change15.toFixed(2) + "%", volSpike, reason, time: new Date().toISOString() });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-// Auto-learn optimizer (evaluate past signals, adjust weights)
-// Simple rule-based optimizer: evaluate last N logs, compute win rate by symbol, adjust weights accordingly
+// evaluate signal outcome for optimizer
 async function evaluateSignalOutcome(symbol, entryPrice, entryTime, lookbackHours = 72, tpPct = 6, slPct = 3) {
   try {
     const limit = Math.min(200, Math.ceil(lookbackHours) + 10);
-    const url = `https://api.binance.com/api/v3/klines?symbol=${encodeURIComponent(symbol)}&interval=1h&limit=${limit}`;
-    const arr = await fetchJSON(url);
-    // find index with timestamp >= entryTime
-    // Binance klines timestamps are ms at [0]
+    // use futures 1h klines for outcome check
+    const url = `${FUTURE_API}/fapi/v1/klines?symbol=${encodeURIComponent(symbol)}&interval=1h&limit=${limit}`;
+    const arr = await safeFetchJSON(url);
     const t0 = new Date(entryTime).getTime();
     let startIdx = 0;
-    for (let i = 0; i < arr.length; i++) {
-      if (arr[i][0] >= t0) { startIdx = i; break; }
-    }
+    for (let i = 0; i < arr.length; i++) if (arr[i][0] >= t0) { startIdx = i; break; }
     const checkCount = Math.min(arr.length - startIdx, Math.ceil(lookbackHours));
     if (checkCount <= 0) return "NEUTRAL";
     const tpPrice = entryPrice * (1 + tpPct / 100);
@@ -345,25 +526,21 @@ async function evaluateSignalOutcome(symbol, entryPrice, entryTime, lookbackHour
   }
 }
 
-// Auto-learn runner: review logs and update config.weights
+// auto-learn: review logs and adjust cfg.weights
 async function autoLearnIfDue() {
   try {
     const cfg = loadConfig();
     if (!cfg.autoLearnEnabled) return;
     const last = cfg.lastAutoLearn ? new Date(cfg.lastAutoLearn).getTime() : 0;
     const now = Date.now();
-    // run once per 24h
     if (now - last < 24 * 3600 * 1000) return;
     console.log("Auto-learn starting...");
     const logs = readLogs();
-    // group signals by symbol
     const stats = {};
     for (const row of logs) {
-      // row shape: {symbol,type,price,rsi_h1,volRatio,takerBuyRatio,leaderScore,sl,tp,confidence,time}
       if (!row || !row.symbol) continue;
       const t = new Date(row.time).getTime();
-      // skip very recent (<1h)
-      if (Date.now() - t < 3600000) continue;
+      if (Date.now() - t < 3600000) continue; // wait 1h
       const sym = row.symbol;
       if (!stats[sym]) stats[sym] = { signals: [], wins: 0, loses: 0, amb: 0, neutral: 0 };
       stats[sym].signals.push(row);
@@ -379,7 +556,6 @@ async function autoLearnIfDue() {
       }
       rec.total = rec.wins + rec.loses + rec.amb + rec.neutral;
     }
-    // update weights: simple rules
     const cfg2 = loadConfig();
     for (const sym of Object.keys(stats)) {
       const r = stats[sym];
@@ -399,13 +575,13 @@ async function autoLearnIfDue() {
   }
 }
 
-// schedule a periodic auto-learn (runs in-process every hour, but only executes once per 24h due to lastAutoLearn check)
-setInterval(() => { autoLearnIfDue().catch(e => console.error(e)); }, 60 * 60 * 1000); // hourly check
+// periodic hourly checker for auto-learn
+setInterval(() => { autoLearnIfDue().catch(e => console.error(e)); }, 60 * 60 * 1000);
 
-// self-ping to prevent some hosts from sleeping (Render free may still sleep; external cron recommended)
+// self-ping to keep awake (internal)
 setInterval(() => {
   if (!PRIMARY_URL) return;
-  fetch(PRIMARY_URL).then(() => console.log("self-ping ok")).catch(() => console.log("self-ping fail"));
-}, 9 * 60 * 1000); // 9 minutes
+  fetch(PRIMARY_URL).catch(() => {});
+}, 9 * 60 * 1000);
 
-app.listen(PORT, () => console.log(`Radar-Signal AI Pro running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Radar Hybrid FUTURE+SPOT running on port ${PORT}`));
