@@ -1,26 +1,41 @@
 import express from "express";
 import fetch from "node-fetch";
-
 const app = express();
-const port = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
-// API proxy cho Binance
+// Hàm lấy dữ liệu nhanh từ Binance
 app.get("/analyze", async (req, res) => {
-  const symbol = req.query.symbol || "BTCUSDT";
-  const tf = req.query.interval || "1h";
-  const base = "https://api.binance.com";
-
   try {
-    const kline = await fetch(`${base}/api/v3/klines?symbol=${symbol}&interval=${tf}&limit=100`);
-    const data = await kline.json();
+    const { symbol = "BTCUSDT", interval = "1h" } = req.query;
+    const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=50`;
+
+    const response = await fetch(url);
+    const data = await response.json();
+
+    if (!Array.isArray(data)) throw new Error("Invalid data");
+
     const closes = data.map(c => Number(c[4]));
+    const avg = closes.reduce((a, b) => a + b, 0) / closes.length;
     const lastPrice = closes.at(-1);
-    const avg = closes.slice(-20).reduce((a,b)=>a+b,0)/20;
-    const ratio = (lastPrice - avg) / avg * 100;
-    res.json({ symbol, lastPrice, ratio, dataPoints: data.length });
+    const ratio = ((lastPrice - avg) / avg * 100).toFixed(2);
+
+    res.json({
+      symbol,
+      lastPrice,
+      ratio: `${ratio}%`,
+      candles: data.length,
+      time: new Date().toISOString()
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.listen(port, () => console.log(`Radar worker running on ${port}`));
+// Auto ping để Render không sleep
+setInterval(() => {
+  fetch(`https://radar-worker-yte4.onrender.com`)
+    .then(() => console.log("Ping success ✅"))
+    .catch(() => console.log("Ping failed ❌"));
+}, 600000); // mỗi 10 phút ping 1 lần
+
+app.listen(PORT, () => console.log(`🚀 Radar Worker running on port ${PORT}`));
