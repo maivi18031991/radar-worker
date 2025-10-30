@@ -3,6 +3,17 @@
 // Deploy on Render. Set ENV: TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, PRIMARY_URL
 
 import express from "express";
+// ====== LEADER GROUP MAP ======
+const LEADER_GROUPS = {
+  "SOLUSDT": ["SUIUSDT", "APTUSDT", "RNDRUSDT"],
+  "ETHUSDT": ["ARBUSDT", "OPUSDT", "LDOUSDT"],
+  "BTCUSDT": ["STXUSDT", "ORDIUSDT"],
+  "INJUSDT": ["PYTHUSDT", "TNSRUSDT"],
+  "LINKUSDT": ["TRBUSDT", "SNXUSDT"],
+  "DOGEUSDT": ["SHIBUSDT", "BONKUSDT"],
+  "AVAXUSDT": ["NEARUSDT", "FTMUSDT"],
+  "SEIUSDT": ["TIAUSDT", "WUSDT"]
+};
 import fs from "fs";
 import path from "path";
 import fetch from "node-fetch";
