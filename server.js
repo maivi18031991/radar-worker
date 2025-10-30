@@ -578,3 +578,12 @@ setInterval(()=>{ if (PRIMARY_URL) fetch(PRIMARY_URL).catch(()=>{}); }, 9*60*100
 
 /* ====== START SERVER ====== */
 app.listen(PORT, ()=>console.log(`Radar Hybrid running on port ${PORT}`));
+
+// === Keep Render awake ===
+const https = require('https');
+const KEEP_ALIVE_INTERVAL = process.env.KEEP_ALIVE_INTERVAL || 10;
+
+setInterval(() => {
+  https.get(process.env.PRIMARY_URL || 'https://radar-worker-yte4.onrender.com');
+  console.log(`[KeepAlive] Ping sent to self at ${new Date().toLocaleTimeString()}`);
+}, KEEP_ALIVE_INTERVAL * 60 * 1000);
