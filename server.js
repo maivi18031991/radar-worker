@@ -622,9 +622,9 @@ setInterval(async ()=>{
 
     const adjust = await LEARN.computeAdjustments();
     if (adjust.adjust) {
-      console.log('[LEARN] adjustments suggested:', adjust);
-      // Sau này có thể thêm: applyAdjustments(adjust.changes);
-    }
+  console.log('[LEARN] adjustments suggested:', adjust);
+  await LEARN.applyAdjustments(adjust.changes);
+}
   } catch (e) {
     console.error('learning scheduler error', e);
   }
