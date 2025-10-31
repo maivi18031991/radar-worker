@@ -8,7 +8,25 @@ import path from "path";
 
 const app = express();
 app.use(express.json());
+// ===== TELEGRAM TEST SEND =====
+const sendTelegram = async (text) => {
+  try {
+    const url = `https://api.telegram.org/bot${process.env.TELEGRAM_TOKEN}/sendMessage`;
+    await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: process.env.TELEGRAM_CHAT_ID,
+        text,
+      }),
+    });
+  } catch (err) {
+    console.error("Telegram send error:", err);
+  }
+};
 
+// Gửi thông báo khi server khởi động
+sendTelegram("✅ Radar Worker has started successfully on Render!");
 /* ====== CONFIG ====== */
 const PORT = process.env.PORT || 10000;
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || "";
