@@ -1,3 +1,4 @@
+import { evaluateSignal } from './smart_layer.js';
 import * as LEARN from './learning_engine.js';
 // server.js - Full Hybrid Smart Radar (Spot + Future + Hybrid) with Active Signals & Exit Monitor
 // DO NOT put tokens here. Use ENV: TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, PRIMARY_URL
@@ -400,6 +401,31 @@ function recordSignalAndDecide(item, sig) {
   const now = nowISO();
   const existing = act[sym] || null;
   const lastSigObj = { type: sig.type, confidence: sig.confidence || 0, time: now };
+  // ===== SMART LAYER CHECK =====
+let learnStats = {};
+try {
+  learnStats = await LEARN.getStats?.() || {};
+} catch(e) {
+  console.log('[SMART] learning stats unavailable:', e.message);
+}
+
+const smart = evaluateSignal(
+  item,
+  sig.type || 'FUTURE',
+  DYNAMIC_CONFIG || {},
+  learnStats
+);
+
+sig.smart = smart;
+
+// Nếu Smart Layer không confirm -> bỏ qua tín hiệu
+if (!smart.confirm) {
+  console.log(`[SMART] ❌ Skip ${sym} | type=${sig.type} | score=${smart.score}`);
+  return { rec: existing, action: 'SKIP_SMART' };
+}
+
+// Nếu confirm thì tiếp tục như bình thường
+console.log(`[SMART] ✅ Confirm ${sym} | type=${sig.type} | score=${smart.score}`);
   if (!existing) {
     const rec = {
       symbol: sym,
