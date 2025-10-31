@@ -1,3 +1,4 @@
+import * as LEARN from './learning_engine.js';
 // server.js - Full Hybrid Smart Radar (Spot + Future + Hybrid) with Active Signals & Exit Monitor
 // DO NOT put tokens here. Use ENV: TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, PRIMARY_URL
 import express from "express";
@@ -81,6 +82,23 @@ async function sendTelegramRaw(text) {
     return {ok:false, error:'no-token'};
   }
   try {
+    // === Learning Engine Record ===
+try {
+  await LEARN.recordSignal({
+    symbol: signal?.symbol || 'UNKNOWN',
+    type: signal?.type || 'SPOT',
+    time: new Date().toISOString(),
+    price: signal?.price || 0,
+    rsi: signal?.rsi || 0,
+    vol: signal?.vol || 0,
+    funding: signal?.funding || 0,
+    tpPct: signal?.tpPct || 0.06,
+    slPct: signal?.slPct || 0.02,
+    extra: { note: text || '' }
+  });
+} catch (e) {
+  console.error('[LEARN] record failed', e);
+}
     const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
     const res = await fetch(url, {
       method: 'POST',
@@ -593,6 +611,24 @@ setInterval(()=>{ optimizerDaily().catch(()=>{}); }, 24*3600*1000);
 
 /* ====== SELF PING (keep alive) ====== */
 setInterval(()=>{ if (PRIMARY_URL) fetch(PRIMARY_URL).catch(()=>{}); }, 9*60*1000);
+
+/* ====== LEARNING SCHEDULER ====== */
+setInterval(async ()=>{
+  try {
+    const n = await LEARN.checkOutcomesForPending();
+    if (n > 0) {
+      console.log(`[LEARN] checked ${n} signals`);
+    }
+
+    const adjust = await LEARN.computeAdjustments();
+    if (adjust.adjust) {
+      console.log('[LEARN] adjustments suggested:', adjust);
+      // Sau này có thể thêm: applyAdjustments(adjust.changes);
+    }
+  } catch (e) {
+    console.error('learning scheduler error', e);
+  }
+}, Number(process.env.LEARNING_POLL_MINUTES || 30) * 60 * 1000);
 
 /* ====== START SERVER ====== */
 app.listen(PORT, ()=>console.log(`Radar Hybrid running on port ${PORT}`));
