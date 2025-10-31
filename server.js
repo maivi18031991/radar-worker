@@ -630,6 +630,26 @@ setInterval(async ()=>{
   }
 }, Number(process.env.LEARNING_POLL_MINUTES || 30) * 60 * 1000);
 
+/* ====== AUTO RELOAD CONFIG ====== */
+import { readFileSync } from 'fs';
+let dynamicConfig = {};
+
+function loadDynamicConfig(){
+  try {
+    const raw = readFileSync('./data/dynamic_config.json', 'utf8');
+    dynamicConfig = JSON.parse(raw);
+    console.log('[CONFIG] dynamic config loaded:', dynamicConfig);
+  } catch(e){
+    console.warn('[CONFIG] no dynamic_config.json yet');
+  }
+}
+
+// Load ban đầu
+loadDynamicConfig();
+
+// Tự reload mỗi 5 phút
+setInterval(loadDynamicConfig, 5 * 60 * 1000);
+
 /* ====== START SERVER ====== */
 app.listen(PORT, ()=>console.log(`Radar Hybrid running on port ${PORT}`));
 
