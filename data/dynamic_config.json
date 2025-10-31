@@ -1,0 +1,7 @@
+{
+  "RSI_PRE_MIN": 42,
+  "RSI_PRE_MAX": 65,
+  "VOL_RATIO_MIN": 1.8,
+  "TAKERS_MIN": 0.52,
+  "FUNDING_MAX": 0.001
+}
