@@ -395,7 +395,7 @@ function buildSignalScaleMessage(rec, lastSig) {
   return lines.join('\n');
 }
 
-function recordSignalAndDecide(item, sig) {
+async function recordSignalAndDecide(item, sig) {
   const act = loadActive();
   const sym = item.symbol;
   const now = nowISO();
