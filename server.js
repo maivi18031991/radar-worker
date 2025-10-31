@@ -41,6 +41,24 @@ const ALERT_DEDUPE_MIN = Number(process.env.ALERT_DEDUPE_MIN || 5);
 const DATA_DIR = path.resolve("./data");
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
+// ===== LOAD DYNAMIC CONFIG =====
+import { fileURLToPath } from 'url';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+let DYNAMIC_CONFIG = {};
+try {
+  const cfgPath = path.join(__dirname, 'data', 'dynamic_config.json');
+  if (fs.existsSync(cfgPath)) {
+    const raw = fs.readFileSync(cfgPath, 'utf-8');
+    DYNAMIC_CONFIG = JSON.parse(raw);
+    console.log('[CONFIG] dynamic config loaded:', DYNAMIC_CONFIG);
+  } else {
+    console.log('[CONFIG] no dynamic_config.json yet');
+  }
+} catch (err) {
+  console.error('[CONFIG] failed to load dynamic config', err);
+}
 /* ====== STATIC LEADER GROUP MAP (editable) ====== */
 const LEADER_GROUPS = {
   "SOLUSDT": ["SUIUSDT","APTUSDT","RNDRUSDT"],
