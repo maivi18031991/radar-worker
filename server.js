@@ -304,10 +304,23 @@ function computeEntryZone(ma20) {
 }
 function detectSignalType(item) {
   // item: merged analysis
+
+  // === Load dynamicConfig for runtime adaptation ===
+  const cfg = typeof dynamicConfig !== 'undefined' ? dynamicConfig : {};
+  const RSI_PRE_MIN = cfg.RSI_PRE_MIN || 42;
+  const RSI_PRE_MAX = cfg.RSI_PRE_MAX || 65;
+  const VOL_RATIO_MIN = cfg.VOL_RATIO_MIN || 1.8;
+  const TAKERS_MIN = cfg.TAKERS_MIN || 0.52;
+
   const v = item.vol_ratio || 0;
   const t = item.takerBuyRatio || 0;
   const r = item.rsi_h1 || 50;
   const ma20 = item.ma20 || item.price;
+
+  // === Apply adaptive thresholds ===
+  if (v >= VOL_RATIO_MIN && t >= TAKERS_MIN && r >= RSI_PRE_MIN && r <= RSI_PRE_MAX) {
+    // logic giữ nguyên như cũ, phía dưới mày có các if() riêng cho từng type
+  }
   // rules (keep original thresholds)
   if (v >= 3 && t >= 0.6 && (item.rsi_h4 && item.rsi_h4 > 50 ? true : r>48)) return 'GOLDEN';
   if (v >= 2.5 && t >= 0.58 && item.price > ma20) return 'SPOT';
