@@ -580,7 +580,7 @@ setInterval(()=>{ if (PRIMARY_URL) fetch(PRIMARY_URL).catch(()=>{}); }, 9*60*100
 app.listen(PORT, ()=>console.log(`Radar Hybrid running on port ${PORT}`));
 
 // === Keep Render awake ===
-const https = require('https');
+import https from 'https';
 const KEEP_ALIVE_INTERVAL = process.env.KEEP_ALIVE_INTERVAL || 10;
 
 setInterval(() => {
