@@ -167,3 +167,24 @@ export async function getStats(){
   const data = await loadData();
   return data.stats || {};
 }
+// === APPLY ADJUSTMENTS (tự tối ưu) ===
+export async function applyAdjustments(changes){
+  try {
+    const configPath = './data/dynamic_config.json';
+    let current = {};
+    try {
+      current = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    } catch(e){ current = {}; }
+
+    // Gộp các thay đổi
+    for (const [key, val] of Object.entries(changes)) {
+      current[key] = val;
+    }
+
+    fs.writeFileSync(configPath, JSON.stringify(current, null, 2));
+    console.log('[LEARN] dynamic config updated:', current);
+    return current;
+  } catch(e) {
+    console.error('[LEARN] applyAdjustments error:', e);
+  }
+}
