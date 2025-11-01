@@ -851,3 +851,12 @@ setInterval(() => {
   https.get(process.env.PRIMARY_URL || 'https://radar-worker-yte4.onrender.com');
   console.log(`[KeepAlive] Ping sent to self at ${new Date().toLocaleTimeString()}`);
 }, KEEP_ALIVE_INTERVAL * 60 * 1000);
+// === TEST EXIT ALERT ===
+detectFutureExit({
+  symbol: "BTCUSDT",
+  entry: 108000,
+  ma20: 109000,
+  fundingNow: -0.001,
+  fundingPrev: 0.002,
+  side: "LONG"
+});
