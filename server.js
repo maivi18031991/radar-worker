@@ -785,6 +785,7 @@ function detectFutureExit({
 
   sendTelegram(msg);
 }
+}
 function formatFutureMessage({symbol, kind, entry, entryLow, entryHigh, sl, tp, funding, conf}) {
   const lines = [];
   lines.push(`🔥 FUTURE ALERT — ${symbol}`);
