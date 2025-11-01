@@ -43,7 +43,7 @@ const DATA_DIR = path.resolve("./data");
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 // ===== LOAD DYNAMIC CONFIG =====
-import { fileURLToPath } from 'url';
+const { fileURLToPath } = require('url');
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
