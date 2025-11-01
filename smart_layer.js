@@ -1,6 +1,6 @@
 // smart_layer.js
-// ES module
-export function evaluateSignal(item, type, config = {}, stats = {}) {
+// CommonJS version
+function evaluateSignal(item, type, config) {
   // config: dynamic_config.json content
   // stats: optional from learning engine (winrates etc.)
   const out = { confirm: false, score: 0, reasons: [] };
@@ -95,3 +95,4 @@ export function evaluateSignal(item, type, config = {}, stats = {}) {
 
   return out;
 }
+module.exports = { evaluateSignal };
