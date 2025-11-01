@@ -7,7 +7,8 @@ const fetch = require('node-fetch');
 const pLimit = require('p-limit');
 const fs = require('fs');
 const path = require('path');
-
+const __filename = __filename || ''; 
+const __dirname = __dirname || process.cwd();
 const app = express();
 app.use(express.json());
 // ===== TELEGRAM TEST SEND =====
@@ -43,7 +44,6 @@ const DATA_DIR = path.resolve("./data");
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 // ===== LOAD DYNAMIC CONFIG =====
-const { fileURLToPath } = require('url');
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
