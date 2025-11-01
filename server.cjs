@@ -44,8 +44,7 @@ const DATA_DIR = path.resolve("./data");
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 // ===== LOAD DYNAMIC CONFIG =====
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const __dirname = process.cwd();
 
 let DYNAMIC_CONFIG = {};
 try {
