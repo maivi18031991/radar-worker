@@ -741,7 +741,45 @@ function computeSlTp(entry, mode='GOLDEN'){
   const tp = +(entry * (1 + cfg.tpPct)).toFixed(8);
   return { sl, tp, slPct: cfg.slPct, tpPct: cfg.tpPct };
 }
+// ====== FUTURE EXIT ALERT (Smart Auto Close Detect) ======
+function detectFutureExit({
+  symbol,
+  entry,
+  ma20,
+  fundingNow,
+  fundingPrev,
+  side
+}) {
+  let exitReason = null;
 
+  // Funding đảo chiều
+  if (typeof fundingNow === "number" && typeof fundingPrev === "number") {
+    if (fundingNow * fundingPrev < 0) {
+      exitReason = "⚠️ Funding đảo chiều";
+    }
+  }
+
+  // Cắt MA20 ngược hướng
+  if (ma20 && entry) {
+    if (side === "LONG" && ma20 > entry * 1.002) {
+      exitReason = "📉 Giá cắt xuống MA20";
+    }
+    if (side === "SHORT" && ma20 < entry * 0.998) {
+      exitReason = "📈 Giá cắt lên MA20";
+    }
+  }
+
+  if (exitReason) {
+    const msg = [
+      `🚨 FUTURE EXIT ALERT — ${symbol}`,
+      `Reason: ${exitReason}`,
+      `Entry: ${entry}`,
+      `MA20: ${ma20}`,
+      `Funding: ${fundingNow}`
+    ].join("\n");
+    sendTelegram(msg);
+  }
+}
 function formatFutureMessage({symbol, kind, entry, entryLow, entryHigh, sl, tp, funding, conf}) {
   const lines = [];
   lines.push(`🔥 FUTURE ALERT — ${symbol}`);
