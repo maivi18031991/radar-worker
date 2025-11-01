@@ -1,7 +1,7 @@
-const { evaluateSignal } = require('./smart_layer.js');
-const LEARN = require('./learning_engine.js');
-// server.js - Full Hybrid Smart Radar (Spot + Future + Hybrid) with Active Signals & Exit Monitor
-// DO NOT put tokens here. Use ENV: TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, PRIMARY_URL
+// server.cjs – CommonJS version
+
+const { evaluateSignal } = require('./smart_layer');
+const LEARN = require('./learning_engine');
 const express = require('express');
 const fetch = require('node-fetch');
 const pLimit = require('p-limit');
