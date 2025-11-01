@@ -709,7 +709,7 @@ setInterval(loadDynamicConfig, 5 * 60 * 1000);
 
 /* ====== FUTURE SMART MODE v2 (Tight SL + Prefer GOLDEN) ====== */
 
-async function safeFetchJSON(url){
+async function safeFetchJSON_FUTURE(url){
   try {
     const res = await fetch(url);
     if(!res.ok) return null;
@@ -761,10 +761,10 @@ async function sendFutureSmartAlert(sym, opts={modePreference:'both'}) {
   const urlFund = `${process.env.API_BASE_FUTURE}/fapi/v1/premiumIndex?symbol=${sym}`;
 
   const [kjson, tjson, fjson] = await Promise.all([
-    safeFetchJSON(urlK),
-    safeFetchJSON(urlT),
-    safeFetchJSON(urlFund)
-  ]);
+    safeFetchJSON_FUTURE(urlK),
+    safeFetchJSON_FUTURE(urlT),
+    safeFetchJSON_FUTURE(urlFund)
+]);
   if(!kjson || !tjson) return null;
 
   const closes = kjson.map(r => Number(r[4]));
