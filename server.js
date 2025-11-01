@@ -848,6 +848,24 @@ async function sendFutureSmartAlert(sym, opts={modePreference:'both'}) {
 /* ====== START SERVER ====== */
 app.listen(PORT, ()=>console.log(`Radar Hybrid running on port ${PORT}`));
 
+// ===== SMART DELAY SWITCH (Future → Spot) =====
+async function smartDelaySwitch(sym, reason) {
+  const delaySec = 30 + Math.floor(Math.random() * 30); // delay ngẫu nhiên 30–60s
+  console.log(`[DELAY] Waiting ${delaySec}s before checking Spot switch...`);
+
+  setTimeout(async () => {
+    try {
+      const res = await fetch(`${process.env.SPOT_MODE_URL}/activate`);
+      if (res.ok) {
+        console.log(`[AUTO-SWITCH] Spot Radar Mode kích hoạt sau ${delaySec}s`);
+      } else {
+        console.warn(`[AUTO-SWITCH] Không kích hoạt được Spot Mode`);
+      }
+    } catch (err) {
+      console.error(`[AUTO-SWITCH] Lỗi khi gọi Spot Mode:`, err);
+    }
+  }, delaySec * 1000);
+}
 // === Keep Render awake ===
 import https from 'https';
 const KEEP_ALIVE_INTERVAL = process.env.KEEP_ALIVE_INTERVAL || 10;
