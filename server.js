@@ -798,6 +798,7 @@ function formatFutureMessage({symbol, kind, entry, entryLow, entryHigh, sl, tp, 
 }
 
 async function sendFutureSmartAlert(sym, opts={modePreference:'both'}) {
+  console.log('[FUT_DEBUG] sendFutureSmartAlert start', { API_BASE_FUTURE: !!process.env.API_BASE_FUTURE });
   if(!process.env.API_BASE_FUTURE) return null;
 
   const urlK = `${process.env.API_BASE_FUTURE}/fapi/v1/klines?symbol=${sym}&interval=1h&limit=60`;
@@ -829,6 +830,7 @@ async function sendFutureSmartAlert(sym, opts={modePreference:'both'}) {
     const entry = price;
     const { sl, tp } = computeSlTp(entry, 'PRE');
     const msg = formatFutureMessage({symbol: sym, kind:'PRE_FUTURE', entry, sl, tp, funding, conf});
+   console.log('[FUT_DEBUG] (isPre) push msg', { symbol, price, ma20, isPre, nearEntry, conf });
     results.push(msg);
     try { await sendTelegram(msg); } catch(e){ console.error('[PRE FUTURE ALERT] fail', e); }
   }
@@ -837,6 +839,7 @@ async function sendFutureSmartAlert(sym, opts={modePreference:'both'}) {
     const entry = price;
     const { sl, tp } = computeSlTp(entry, 'GOLDEN');
     const msg = formatFutureMessage({symbol: sym, kind:'GOLDEN_FUTURE', entry, sl, tp, funding, conf});
+    console.log('[FUT_DEBUG] (isGolden) push msg', { symbol, price, ma20, isGolden, nearEntry, conf });
     results.push(msg);
     try { await sendTelegram(msg); } catch(e){ console.error('[GOLDEN FUTURE ALERT] fail', e); }
   }
