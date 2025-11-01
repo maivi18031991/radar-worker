@@ -1,12 +1,12 @@
-import { evaluateSignal } from './smart_layer.js';
-import * as LEARN from './learning_engine.js';
+const { evaluateSignal } = require('./smart_layer.js');
+const LEARN = require('./learning_engine.js');
 // server.js - Full Hybrid Smart Radar (Spot + Future + Hybrid) with Active Signals & Exit Monitor
 // DO NOT put tokens here. Use ENV: TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, PRIMARY_URL
-import express from "express";
-import fetch from "node-fetch";
-import pLimit from "p-limit";
-import fs from "fs";
-import path from "path";
+const express = require('express');
+const fetch = require('node-fetch');
+const pLimit = require('p-limit');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 app.use(express.json());
