@@ -7,7 +7,6 @@ const fetch = require('node-fetch');
 const pLimit = require('p-limit');
 const fs = require('fs');
 const path = require('path');
-const __filename = __filename || ''; 
 const __dirname = __dirname || process.cwd();
 const app = express();
 app.use(express.json());
