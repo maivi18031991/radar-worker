@@ -707,6 +707,100 @@ loadDynamicConfig();
 // Tự reload mỗi 5 phút
 setInterval(loadDynamicConfig, 5 * 60 * 1000);
 
+/* ====== FUTURE SMART MODE v2 (Tight SL + Prefer GOLDEN) ====== */
+
+async function safeFetchJSON(url){
+  try {
+    const res = await fetch(url);
+    if(!res.ok) return null;
+    return await res.json();
+  } catch(e){ return null; }
+}
+
+function sma(arr, n=20){
+  if(!arr || arr.length < 1) return null;
+  const slice = arr.slice(-n);
+  const sum = slice.reduce((s,x)=> s + Number(x), 0);
+  return sum / slice.length;
+}
+
+function computeFutureEntryZone(ma20){
+  if(!ma20) return { entryLow:null, entryHigh:null };
+  const low = +(ma20 * 0.995).toFixed(8);
+  const high = +(ma20 * 1.005).toFixed(8);  // ±0.5%
+  return { entryLow: low, entryHigh: high };
+}
+
+function computeSlTp(entry, mode='GOLDEN'){
+  const cfg = {
+    PRE: { slPct: 0.008, tpPct: 0.04 },
+    GOLDEN: { slPct: 0.02, tpPct: 0.08 }
+  }[mode] || { slPct: 0.02, tpPct: 0.08 };
+  const sl = +(entry * (1 - cfg.slPct)).toFixed(8);
+  const tp = +(entry * (1 + cfg.tpPct)).toFixed(8);
+  return { sl, tp, slPct: cfg.slPct, tpPct: cfg.tpPct };
+}
+
+function formatFutureMessage({symbol, kind, entry, entryLow, entryHigh, sl, tp, funding, conf}) {
+  const lines = [];
+  lines.push(`🔥 FUTURE ALERT — ${symbol}`);
+  lines.push(`Type: ${kind}`);
+  lines.push(`Entry: ${entryLow && entryHigh ? `${entryLow}–${entryHigh}` : entry}`);
+  lines.push(`SL: ${sl} | TP: ${tp}`);
+  if(typeof funding !== 'undefined') lines.push(`Funding: ${funding}`);
+  if(typeof conf !== 'undefined') lines.push(`Confidence: ${Math.round(conf)}%`);
+  lines.push(`(Market: FUTURE, Mode: Tight-GOLDEN)`);
+  return lines.join('\n');
+}
+
+async function sendFutureSmartAlert(sym, opts={modePreference:'both'}) {
+  if(!process.env.API_BASE_FUTURE) return null;
+
+  const urlK = `${process.env.API_BASE_FUTURE}/fapi/v1/klines?symbol=${sym}&interval=1h&limit=60`;
+  const urlT = `${process.env.API_BASE_FUTURE}/fapi/v1/ticker/24hr?symbol=${sym}`;
+  const urlFund = `${process.env.API_BASE_FUTURE}/fapi/v1/premiumIndex?symbol=${sym}`;
+
+  const [kjson, tjson, fjson] = await Promise.all([
+    safeFetchJSON(urlK),
+    safeFetchJSON(urlT),
+    safeFetchJSON(urlFund)
+  ]);
+  if(!kjson || !tjson) return null;
+
+  const closes = kjson.map(r => Number(r[4]));
+  const price = Number(tjson.lastPrice || closes.at(-1));
+  const ma20 = sma(closes, 20);
+  const entryZone = computeFutureEntryZone(ma20);
+  const funding = fjson?.lastFundingRate || 0;
+
+  const change24 = Number(tjson.priceChangePercent || 0);
+  const nearEntry = price <= entryZone.entryHigh && price >= entryZone.entryLow;
+  const isGolden = (price > ma20 * 1.03 && change24 >= 6);
+  const isPre = nearEntry && change24 > 0.5 && change24 < 6 && funding < 0.0015;
+
+  let conf = isGolden ? Math.min(99, 70 + change24 * 2) : (isPre ? 45 + change24 * 2 : 0);
+  const results = [];
+
+  if(isPre && (opts.modePreference === 'both' || opts.modePreference === 'pre')){
+    const entry = price;
+    const { sl, tp } = computeSlTp(entry, 'PRE');
+    const msg = formatFutureMessage({symbol: sym, kind:'PRE_FUTURE', entry, sl, tp, funding, conf});
+    results.push(msg);
+    try { await sendTelegram(msg); } catch(e){ console.error('[PRE FUTURE ALERT] fail', e); }
+  }
+
+  if(isGolden && (opts.modePreference === 'both' || opts.modePreference === 'golden')){
+    const entry = price;
+    const { sl, tp } = computeSlTp(entry, 'GOLDEN');
+    const msg = formatFutureMessage({symbol: sym, kind:'GOLDEN_FUTURE', entry, sl, tp, funding, conf});
+    results.push(msg);
+    try { await sendTelegram(msg); } catch(e){ console.error('[GOLDEN FUTURE ALERT] fail', e); }
+  }
+
+  return results;
+}
+/* ====== END FUTURE SMART MODE v2 ====== */
+
 /* ====== START SERVER ====== */
 app.listen(PORT, ()=>console.log(`Radar Hybrid running on port ${PORT}`));
 
