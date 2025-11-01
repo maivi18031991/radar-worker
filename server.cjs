@@ -885,3 +885,6 @@ detectFutureExit({
   fundingPrev: 0.002,
   side: "LONG"
 });
+app.listen(PORT, () => {
+  console.log(`✅ Radar Worker running on port ${PORT}`);
+});
