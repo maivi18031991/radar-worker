@@ -770,24 +770,20 @@ function detectFutureExit({
   }
 
   if (exitReason) {
-    const msg = [
-      `🚨 FUTURE EXIT ALERT — ${symbol}`,
-      `Reason: ${exitReason}`,
-      `Entry: ${entry}`,
-      `MA20: ${ma20}`,
-      `Funding: ${fundingNow}`
-    ].join("\n");
-    // Tự động chuyển sang Spot Radar Mode khi có tín hiệu thoát lệnh
-if (process.env.SPOT_MODE_URL) {
-  try {
-    fetch(`${process.env.SPOT_MODE_URL}/activate`, { method: "POST" });
-    console.log(`[AUTO-SWITCH] Spot Radar Mode kích hoạt sau cảnh báo EXIT`);
-  } catch (err) {
-    console.warn(`[AUTO-SWITCH] Lỗi khi gọi Spot Mode:`, err.message);
+  const msg = [
+    `📉 FUTURE EXIT ALERT – ${symbol}`,
+    `Reason: ${exitReason}`,
+    `Entry: ${entry}`,
+    `MA20: ${ma20}`,
+    `Funding: ${fundingNow}`
+  ].join("\n");
+
+  // Thay vì gọi Spot Mode trực tiếp, ta gọi Smart Delay Switch
+  if (process.env.SPOT_MODE_URL) {
+    smartDelaySwitch(symbol, 'EXIT');
   }
-}
-    sendTelegram(msg);
-  }
+
+  sendTelegram(msg);
 }
 function formatFutureMessage({symbol, kind, entry, entryLow, entryHigh, sl, tp, funding, conf}) {
   const lines = [];
