@@ -870,7 +870,7 @@ async function smartDelaySwitch(sym, reason) {
   }, delaySec * 1000);
 }
 // === Keep Render awake ===
-import https from 'https';
+import * as https from 'https';
 const KEEP_ALIVE_INTERVAL = process.env.KEEP_ALIVE_INTERVAL || 10;
 
 setInterval(() => {
