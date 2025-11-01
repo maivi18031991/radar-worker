@@ -1,8 +1,8 @@
 // learning_engine.js
-// ES module - requires package.json "type":"module"
-import fs from 'fs/promises';
-import path from 'path';
-import fetch from 'node-fetch'; // project already has node-fetch in deps
+// CommonJS version – dùng require thay cho import
+const fs = require('fs/promises');
+const path = require('path');
+const fetch = require('node-fetch');
 
 const DATA_FILE = path.resolve('./data/learning.json');
 const CHECK_HOURS = Number(process.env.LEARNING_CHECK_HOURS || 24); // sau bao nhiêu giờ check outcome
@@ -163,12 +163,12 @@ export async function computeAdjustments(){
 /**
  * export helper to get stats
  */
-export async function getStats(){
+async function getStats() {
   const data = await loadData();
   return data.stats || {};
 }
 // === APPLY ADJUSTMENTS (tự tối ưu) ===
-export async function applyAdjustments(changes){
+async function applyAdjustments(changes) {
   try {
     const configPath = './data/dynamic_config.json';
     let current = {};
@@ -188,3 +188,4 @@ export async function applyAdjustments(changes){
     console.error('[LEARN] applyAdjustments error:', e);
   }
 }
+module.exports = { loadData, saveData, getStats, applyAdjustments };
