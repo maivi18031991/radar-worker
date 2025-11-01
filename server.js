@@ -707,20 +707,21 @@ loadDynamicConfig();
 // Tự reload mỗi 5 phút
 setInterval(loadDynamicConfig, 5 * 60 * 1000);
 
-/* ====== FUTURE SMART MODE v2 (Tight SL + Prefer GOLDEN) ====== */
-
-async function safeFetchJSON_FUTURE(url){
+// ====== FUTURE SMART MODE v2 (Fixed version) ======
+async function safeFetchJSON_FUTV2(url){    // ← đổi tên FUTURE -> FUTV2
   try {
     const res = await fetch(url);
     if(!res.ok) return null;
     return await res.json();
-  } catch(e){ return null; }
+  } catch(e) { 
+    return null; 
+  }
 }
 
-function sma(arr, n=20){
+function smaFUTURE(arr, n=20){              // ← đổi tên sma -> smaFUTURE
   if(!arr || arr.length < 1) return null;
   const slice = arr.slice(-n);
-  const sum = slice.reduce((s,x)=> s + Number(x), 0);
+  const sum = slice.reduce((s, x) => s + Number(x), 0);
   return sum / slice.length;
 }
 
@@ -761,9 +762,9 @@ async function sendFutureSmartAlert(sym, opts={modePreference:'both'}) {
   const urlFund = `${process.env.API_BASE_FUTURE}/fapi/v1/premiumIndex?symbol=${sym}`;
 
   const [kjson, tjson, fjson] = await Promise.all([
-    safeFetchJSON_FUTURE(urlK),
-    safeFetchJSON_FUTURE(urlT),
-    safeFetchJSON_FUTURE(urlFund)
+  safeFetchJSON_FUTV2(urlK),
+  safeFetchJSON_FUTV2(urlT),
+  safeFetchJSON_FUTV2(urlFund)
 ]);
   if(!kjson || !tjson) return null;
 
