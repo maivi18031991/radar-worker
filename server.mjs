@@ -847,10 +847,13 @@ async function sendFutureSmartAlert(sym, opts={modePreference:'both'}) {
 
   return results;
 }
-/* ====== END FUTURE SMART MODE v2 ====== */
-
-/* ====== START SERVER ====== */
+/* ====== END FUTURE SMART MODE /* ===== START SERVER ===== */
+app.get('/', (req, res) => {
   res.send('Radar Worker Running ✅');
+});
+
+app.listen(PORT, () => {
+  console.log(`✅ Radar Worker running on port ${PORT}`);
 });
 // ===== SMART DELAY SWITCH (Future → Spot) =====
 async function smartDelaySwitch(sym, reason) {
@@ -886,8 +889,4 @@ detectFutureExit({
   fundingNow: -0.001,
   fundingPrev: 0.002,
   side: "LONG"
-});
-
-app.listen(PORT, () => {
-  console.log(`✅ Radar Worker running on port ${PORT}`);
 });
