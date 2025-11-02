@@ -1,7 +1,6 @@
 {
   "name": "radar-worker",
   "version": "1.0.0",
-  "type": "module",
   "main": "server.cjs",
   "scripts": {
     "start": "node server.cjs"
