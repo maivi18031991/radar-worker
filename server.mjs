@@ -1,12 +1,12 @@
-// server.cjs – CommonJS version
+// server.mjs – CommonJS version
 
-const { evaluateSignal } = require('./smart_layer');
-const LEARN = require('./learning_engine');
-const express = require('express');
-const fetch = require('node-fetch');
-const pLimit = require('p-limit');
-const fs = require('fs');
-const path = require('path');
+import { evaluateSignal } = require('./smart_layer.js');
+import LEARN = require('./learning_engine');
+import express from "express";
+import fetch from "node-fetch";
+import pLimit from "p-limit";
+import fs from "fs";
+import path from "path";
 const PROJECT_ROOT = (typeof __dirname !== 'undefined') ? __dirname : process.cwd();
 const app = express();
 app.use(express.json());
