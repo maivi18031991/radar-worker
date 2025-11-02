@@ -890,11 +890,7 @@ detectFutureExit({
   fundingPrev: 0.002,
   side: "LONG"
 });
-const PORT = process.env.PORT || 3000;
 
-app.listen(PORT, () => {
-  console.log(`✅ Radar Worker running on port ${PORT}`);
-});
 app.listen(PORT, () => {
   console.log(`✅ Radar Worker running on port ${PORT}`);
 });
