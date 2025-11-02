@@ -7,6 +7,9 @@ import fetch from "node-fetch";
 import pLimit from "p-limit";
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from 'url';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = (typeof __dirname !== 'undefined') ? __dirname : process.cwd();
 const app = express();
 app.use(express.json());
@@ -43,10 +46,7 @@ const DATA_DIR = path.resolve("./data");
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 // ===== LOAD DYNAMIC CONFIG =====
-import { fileURLToPath } from 'url';
-import { dirname } from 'path';
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+
 let DYNAMIC_CONFIG = {};
 try {
   const cfgPath = path.join(__dirname, 'data', 'dynamic_config.json');
