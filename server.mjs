@@ -1,7 +1,7 @@
 // server.mjs – CommonJS version
 
 import { evaluateSignal } from "./smart_layer.js";
-import LEARN = require('./learning_engine');
+import * as LEARN from './learning_engine.js';
 import express from "express";
 import fetch from "node-fetch";
 import pLimit from "p-limit";
