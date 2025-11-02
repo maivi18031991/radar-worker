@@ -1,8 +1,8 @@
 // learning_engine.js
 // CommonJS version – dùng require thay cho import
-const fs = require('fs/promises');
-const path = require('path');
-const fetch = require('node-fetch');
+import fs from "fs";
+import path from "path";
+import pLimit from "p-limit";
 
 const DATA_FILE = path.resolve('./data/learning.json');
 const CHECK_HOURS = Number(process.env.LEARNING_CHECK_HOURS || 24); // sau bao nhiêu giờ check outcome
@@ -188,4 +188,4 @@ async function applyAdjustments(changes) {
     console.error('[LEARN] applyAdjustments error:', e);
   }
 }
-module.exports = { loadData, saveData, getStats, applyAdjustments };
+export default = { loadData, saveData, getStats, applyAdjustments };
