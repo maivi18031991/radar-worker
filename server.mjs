@@ -1,893 +1,346 @@
-// server.mjs – CommonJS version
+// server.mjs
+// Spot Smart Radar - Full USDT scan, PRE / SPOT / GOLDEN / IMF, detailed logs, 1m scan
+// Copy-paste thay file hiện tại. Requires node >= 16, run: node --experimental-modules server_spot_full.mjs (if needed)
 
-import { evaluateSignal } from "./smart_layer.js";
-import * as LEARN from './learning_engine.js';
-import express from "express";
+// ---- Imports & config ----
 import fetch from "node-fetch";
-import pLimit from "p-limit";
 import fs from "fs";
 import path from "path";
-import { fileURLToPath } from 'url';
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const PROJECT_ROOT = (typeof __dirname !== 'undefined') ? __dirname : process.cwd();
-const app = express();
-app.use(express.json());
-// ===== TELEGRAM TEST SEND =====
-const sendTelegram = async (text) => {
-  try {
-    const url = `https://api.telegram.org/bot${process.env.TELEGRAM_TOKEN}/sendMessage`;
-    await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: process.env.TELEGRAM_CHAT_ID,
-        text,
-      }),
-    });
-  } catch (err) {
-    console.error("Telegram send error:", err);
-  }
-};
 
-// Gửi thông báo khi server khởi động
-sendTelegram("✅ Radar Worker has started successfully on Render!");
-/* ====== CONFIG ====== */
-const PORT = process.env.PORT;
-const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || "";
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "";
-const PRIMARY_URL = process.env.PRIMARY_URL || `http://localhost:${PORT}`;
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || process.env.TELEGRAM_BOT_TOKEN || "";
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || process.env.TELEGRAM_CHAT || "";
 const API_BASE_SPOT = process.env.API_BASE_SPOT || "https://api.binance.com";
-const API_BASE_FUTURE = process.env.API_BASE_FUTURE || "https://fapi.binance.com";
-const MAX_CONC = Number(process.env.MAX_CONC || 8);
-const ALERT_THROTTLE_H = Number(process.env.ALERT_THROTTLE_H || 6);
-const ALERT_DEDUPE_MIN = Number(process.env.ALERT_DEDUPE_MIN || 5);
-const DATA_DIR = path.resolve("./data");
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+const PRIMARY_URL = process.env.PRIMARY_URL || "";
+const KEEP_ALIVE_INTERVAL = Number(process.env.KEEP_ALIVE_INTERVAL || 10); // minutes
+const SCAN_INTERVAL_MS = Number(process.env.SCAN_INTERVAL_SEC || 60) * 1000; // default 60s
+const SYMBOL_REFRESH_H = 6;
+const SYMBOL_MIN_VOL = Number(process.env.SYMBOL_MIN_VOL || 10000000); // 10M default
+const SYMBOL_MIN_CHANGE = Number(process.env.SYMBOL_MIN_CHANGE || 3); // 3% default
+const ACTIVE_FILE = path.resolve("./active_spots.json");
 
-// ===== LOAD DYNAMIC CONFIG =====
-
-let DYNAMIC_CONFIG = {};
-try {
-  const cfgPath = path.join(__dirname, 'data', 'dynamic_config.json');
-  if (fs.existsSync(cfgPath)) {
-    const raw = fs.readFileSync(cfgPath, 'utf-8');
-    DYNAMIC_CONFIG = JSON.parse(raw);
-    console.log('[CONFIG] dynamic config loaded:', DYNAMIC_CONFIG);
-  } else {
-    console.log('[CONFIG] no dynamic_config.json yet');
-  }
-} catch (err) {
-  console.error('[CONFIG] failed to load dynamic config', err);
+// logger (dạng cũ, chi tiết)
+function logv(msg) {
+  const s = `[${new Date().toLocaleString('vi-VN')}] ${msg}`;
+  console.log(s);
+  // optional: append to local log file
+  try {
+    fs.appendFileSync(path.resolve('./spot_logs.txt'), s + "\n");
+  } catch(e){}
 }
-/* ====== STATIC LEADER GROUP MAP (editable) ====== */
-const LEADER_GROUPS = {
-  "SOLUSDT": ["SUIUSDT","APTUSDT","RNDRUSDT"],
-  "ETHUSDT": ["ARBUSDT","OPUSDT","LDOUSDT"],
-  "BTCUSDT": ["STXUSDT","ORDIUSDT"],
-  "LINKUSDT": ["TRBUSDT","SNXUSDT"],
-  "DOGEUSDT": ["SHIBUSDT","BONKUSDT"],
-  "AVAXUSDT": ["NEARUSDT","FTMUSDT"],
-  "SEIUSDT": ["TIAUSDT","WUSDT"]
-};
 
-/* ====== UTILITIES ====== */
-function nowISO(){ return new Date().toISOString(); }
-function fmt(n, d=6){ if (n === null || n === undefined) return null; return Number(n).toFixed(d); }
-async function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
-const limitP = pLimit(MAX_CONC);
+// ---- Telegram sender (unified bot for Spot) ----
+async function sendTelegram(text) {
+  if(!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
+    logv('[TELEGRAM] missing TOKEN/CHAT_ID');
+    return;
+  }
+  const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
+  const payload = { chat_id: TELEGRAM_CHAT_ID, text, parse_mode: 'HTML', disable_web_page_preview: true };
+  try {
+    const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
+    if(!res.ok) logv(`[TELEGRAM] send failed ${res.status}`);
+  } catch (e) {
+    logv('[TELEGRAM] error ' + e.message);
+  }
+}
 
-/* ====== SAFE FETCH JSON ====== */
-async function safeFetchJSON(url, opts={}, retries=3) {
-  let lastErr = null;
-  for (let i=0;i<retries;i++){
-    try {
-      const r = await fetch(url, Object.assign({timeout: 15000}, opts));
-      if (!r.ok) throw new Error('HTTP ' + r.status);
+// ---- Safe fetch JSON ----
+async function safeFetchJSON(url, retries = 2) {
+  for(let i=0;i<retries;i++){
+    try{
+      const r = await fetch(url);
+      if(!r.ok) {
+        logv(`[HTTP] ${r.status} ${url}`);
+        await new Promise(r=>setTimeout(r, 200*(i+1)));
+        continue;
+      }
       const j = await r.json();
       return j;
-    } catch(e) {
-      lastErr = e;
-      await sleep(400*(i+1));
+    }catch(e){
+      logv('[HTTP] fetch error ' + e.message + ' url=' + url);
+      await new Promise(r=>setTimeout(r, 200*(i+1)));
     }
   }
-  throw lastErr;
+  return null;
 }
 
-/* ====== TELEGRAM SENDER ====== */
-async function sendTelegramRaw(text) {
-  if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
-    console.log('[TG] missing token/chat ->', text.slice(0,60));
-    return {ok:false, error:'no-token'};
-  }
-  try {
-    // === Learning Engine Record ===
-try {
-  await LEARN.recordSignal({
-    symbol: signal?.symbol || 'UNKNOWN',
-    type: signal?.type || 'SPOT',
-    time: new Date().toISOString(),
-    price: signal?.price || 0,
-    rsi: signal?.rsi || 0,
-    vol: signal?.vol || 0,
-    funding: signal?.funding || 0,
-    tpPct: signal?.tpPct || 0.06,
-    slPct: signal?.slPct || 0.02,
-    extra: { note: text || '' }
-  });
-} catch (e) {
-  console.error('[LEARN] record failed', e);
-}
-    const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text, parse_mode: 'HTML', disable_web_page_preview: true })
-    });
-    const j = await res.json();
-    return j;
-  } catch(e) {
-    console.error('[TG] err', e.message || e);
-    return {ok:false, error: String(e)};
-  }
-}
-
-/* ====== SIMPLE INDICATORS ====== */
-function sma(arr, n) {
-  if (!arr || arr.length === 0) return 0;
-  const slice = arr.slice(-n);
-  return slice.reduce((a,b)=>a+b,0)/slice.length;
-}
-function rsiCalc(closes, period=14) {
-  if (!closes || closes.length <= period) return 50;
-  let gains=0, losses=0;
-  for (let i=1;i<=period;i++){
-    const d = closes[i]-closes[i-1];
-    if (d>0) gains+=d; else losses -= d;
-  }
-  let avgG = gains/period, avgL = losses/period;
-  for (let i=period+1;i<closes.length;i++){
-    const d = closes[i]-closes[i-1];
-    avgG = (avgG*(period-1) + (d>0?d:0))/period;
-    avgL = (avgL*(period-1) + (d<0?-d:0))/period;
-  }
-  if (avgL === 0) return 100;
-  const rs = avgG/avgL;
-  return 100 - 100/(1+rs);
-}
-function atrFromK(klines, period=14) {
-  if (!klines || klines.length < period+1) return 0;
-  // klines: [openTime, open, high, low, close, vol, ...]
-  const trs = [];
-  for (let i=1;i<klines.length;i++){
-    const high = Number(klines[i][2]), low = Number(klines[i][3]), prevClose = Number(klines[i-1][4]);
-    trs.push(Math.max(high-low, Math.abs(high-prevClose), Math.abs(low-prevClose)));
-  }
-  return sma(trs, Math.min(period, trs.length));
-}
-
-/* ====== MARKET TYPE DETECTION ====== */
-async function hasFutureSymbol(sym) {
-  try {
-    const url = `${API_BASE_FUTURE}/fapi/v1/exchangeInfo`;
-    const info = await safeFetchJSON(url);
-    if (!info || !info.symbols) return false;
-    return info.symbols.some(s=>s.symbol === sym && s.status === 'TRADING');
-  } catch(e){ return false; }
-}
-async function hasSpotSymbol(sym) {
-  try {
-    const url = `${API_BASE_SPOT}/api/v3/exchangeInfo`;
-    const info = await safeFetchJSON(url);
-    if (!info || !info.symbols) return false;
-    return info.symbols.some(s=>s.symbol === sym && s.status === 'TRADING');
-  } catch(e){ return false; }
-}
-async function detectMarketType(sym) {
-  // fast heuristic: try futures ticker first
-  const futOk = await (async ()=>{
-    try { const r = await safeFetchJSON(`${API_BASE_FUTURE}/fapi/v1/ticker/24hr?symbol=${encodeURIComponent(sym)}`, {}, 1); return !!r; } catch(e){ return false; }
-  })();
-  const spotOk = await (async ()=>{
-    try { const r = await safeFetchJSON(`${API_BASE_SPOT}/api/v3/ticker/24hr?symbol=${encodeURIComponent(sym)}`, {}, 1); return !!r; } catch(e){ return false; }
-  })();
-  if (spotOk && futOk) return 'HYBRID';
-  if (futOk) return 'FUTURE_ONLY';
-  if (spotOk) return 'SPOT_ONLY';
-  return 'UNKNOWN';
-}
-
-/* ====== ANALYZERS ====== */
-// analyzeSpot: fetch spot klines + ticker
-async function analyzeSpot(sym, interval='1h', limit=50) {
-  const urlK = `${API_BASE_SPOT}/api/v3/klines?symbol=${encodeURIComponent(sym)}&interval=${interval}&limit=${limit}`;
-  const urlT = `${API_BASE_SPOT}/api/v3/ticker/24hr?symbol=${encodeURIComponent(sym)}`;
-  const [klines, ticker] = await Promise.all([safeFetchJSON(urlK).catch(()=>null), safeFetchJSON(urlT).catch(()=>null)]);
-  if (!klines || !ticker) return null;
-  const closes = klines.map(r=>Number(r[4]));
-  const vols = klines.map(r=>Number(r[5]));
-  const price = Number(ticker.lastPrice || closes.at(-1) || 0);
-  const ma20 = sma(closes, 20);
-  const rsi_h1 = Math.round(rsiCalc(closes, 14) || 50);
-  const volAvg5 = sma(vols, 5) || 1;
-  const volAvg20 = sma(vols, 20) || 1;
-  const vol_ratio = volAvg20>0? (volAvg5/volAvg20) : 1;
-  const takerBuyRatio = (()=> {
-    try {
-      const takerBuy = Number(ticker.takerBuyBaseAssetVolume || 0);
-      const quoteVol = Number(ticker.quoteVolume || 1);
-      return quoteVol>0 ? Math.min(1, takerBuy/quoteVol) : 0;
-    } catch(e){ return 0; }
-  })();
-  return {
-    symbol: sym, source: 'spot', price, ma20, rsi_h1,
-    vol_ratio: Number(vol_ratio.toFixed(3)), takerBuyRatio: Number(takerBuyRatio.toFixed(3)),
-    closes, vols, rawTicker: ticker, klines
-  };
-}
-
-// analyzeFuture: fetch futures klines + ticker + OI + funding
-async function analyzeFuture(sym, interval='1h', limit=50) {
-  const urlK = `${API_BASE_FUTURE}/fapi/v1/klines?symbol=${encodeURIComponent(sym)}&interval=${interval}&limit=${limit}`;
-  const urlT = `${API_BASE_FUTURE}/fapi/v1/ticker/24hr?symbol=${encodeURIComponent(sym)}`;
-  const urlOI = `${API_BASE_FUTURE}/fapi/v1/openInterest?symbol=${encodeURIComponent(sym)}`;
-  const urlFund = `${API_BASE_FUTURE}/fapi/v1/fundingRate?symbol=${encodeURIComponent(sym)}&limit=3`;
-  const [klines, ticker, oiObj, fundArr] = await Promise.all([
-    safeFetchJSON(urlK).catch(()=>null),
-    safeFetchJSON(urlT).catch(()=>null),
-    safeFetchJSON(urlOI).catch(()=>null),
-    safeFetchJSON(urlFund).catch(()=>null)
-  ]);
-  if (!klines || !ticker) return null;
-  const closes = klines.map(r=>Number(r[4]));
-  const vols = klines.map(r=>Number(r[5]));
-  const price = Number(ticker.lastPrice || closes.at(-1) || 0);
-  const ma20 = sma(closes, 20);
-  const rsi_h1 = Math.round(rsiCalc(closes, 14) || 50);
-  const volAvg5 = sma(vols, 5) || 1;
-  const volAvg20 = sma(vols, 20) || 1;
-  const vol_ratio = volAvg20>0? (volAvg5/volAvg20) : 1;
-  const takerBuyRatio = (()=> {
-    try {
-      const takerBuy = Number(ticker.takerBuyBaseAssetVolume || 0);
-      const quoteVol = Number(ticker.quoteVolume || 1);
-      return quoteVol>0 ? Math.min(1, takerBuy/quoteVol) : 0;
-    } catch(e){ return 0; }
-  })();
-  const oi = oiObj ? Number(oiObj.openInterest || 0) : null;
-  const funding = Array.isArray(fundArr) && fundArr.length ? fundArr : null;
-  return {
-    symbol: sym, source: 'future', price, ma20, rsi_h1,
-    vol_ratio: Number(vol_ratio.toFixed(3)), takerBuyRatio: Number(takerBuyRatio.toFixed(3)),
-    closes, vols, rawTicker: ticker, klines, oi, funding
-  };
-}
-
-// analyzeHybrid: combine spot & future (prefer future metrics for scoring)
-async function analyzeHybrid(sym) {
-  // attempt futures first and spot
-  const [fut, spot] = await Promise.allSettled([analyzeFuture(sym).catch(()=>null), analyzeSpot(sym).catch(()=>null)]);
-  const future = fut.status === 'fulfilled' ? fut.value : null;
-  const s = spot.status === 'fulfilled' ? spot.value : null;
-  // merge
-  const source = future? 'future' : (s? 'spot' : 'none');
-  const base = Object.assign({}, future || s || {});
-  base.source = source;
-  // if both exist compute correlation quick (price closes corr)
-  if (future && s) {
-    try {
-      const a = future.closes.slice(-20), b = s.closes.slice(-20);
-      // simple correlation: pearson
-      const meanA = sma(a, a.length), meanB = sma(b, b.length);
-      let num=0, denA=0, denB=0;
-      for (let i=0;i<a.length;i++){ num += (a[i]-meanA)*(b[i]-meanB); denA += (a[i]-meanA)**2; denB += (b[i]-meanB)**2; }
-      const corr = denA>0 && denB>0 ? (num/Math.sqrt(denA*denB)) : 0;
-      base.correlation = Number(corr.toFixed(3));
-    } catch(e){ base.correlation = 0; }
-    // prefer future vol_ratio if present
-    base.vol_ratio = future.vol_ratio || s.vol_ratio;
-    base.takerBuyRatio = future.takerBuyRatio || s.takerBuyRatio;
-    // funding and oi from future
-    base.oi = future.oi;
-    base.funding = future.funding;
-  } else {
-    base.correlation = null;
-    // if only spot, ensure vol_ratio exists
-    base.vol_ratio = base.vol_ratio || (s? s.vol_ratio : 0);
-  }
-  // leaderScore heuristic
-  let leaderScore = 0;
-  if (base.vol_ratio > 2) leaderScore += 30;
-  if (base.takerBuyRatio > 0.55) leaderScore += 25;
-  if (base.rsi_h1 >= 50 && base.rsi_h1 <= 65) leaderScore += 20;
-  if (base.price > (base.ma20 || 0)) leaderScore += 15;
-  if (base.oi && Number(base.oi) > 0) leaderScore += 10;
-  base.leaderScore = Math.min(100, Math.round(leaderScore));
-  return base;
-}
-
-/* ====== SIGNAL DECIDER (PRE / SPOT / GOLDEN / IMF) & entry/sl/tp ====== */
-function smartStop(entry, closes) {
-  try {
-    if (!closes || closes.length < 3) return Math.round(entry * 0.95 * 1e6)/1e6;
-    const lows = closes.slice(-3).map(x=>Number(x));
-    const min3 = Math.min(...lows);
-    const sl = Math.min(entry * 0.95, min3 * 0.995);
-    return Math.round(sl * 1000000)/1000000;
-  } catch(e) { return Math.round(entry * 0.95 * 1e6)/1e6; }
-}
-function computeEntryZone(ma20) {
-  const low = +(ma20 * 0.99);
-  const high = +(ma20 * 1.02);
-  return { entryLow: Number(low.toFixed(8)), entryHigh: Number(high.toFixed(8)) };
-}
-function detectSignalType(item) {
-  // item: merged analysis
-
-  // === Load dynamicConfig for runtime adaptation ===
-  const cfg = typeof dynamicConfig !== 'undefined' ? dynamicConfig : {};
-  const RSI_PRE_MIN = cfg.RSI_PRE_MIN || 42;
-  const RSI_PRE_MAX = cfg.RSI_PRE_MAX || 65;
-  const VOL_RATIO_MIN = cfg.VOL_RATIO_MIN || 1.8;
-  const TAKERS_MIN = cfg.TAKERS_MIN || 0.52;
-
-  const v = item.vol_ratio || 0;
-  const t = item.takerBuyRatio || 0;
-  const r = item.rsi_h1 || 50;
-  const ma20 = item.ma20 || item.price;
-
-  // === Apply adaptive thresholds ===
-  if (v >= VOL_RATIO_MIN && t >= TAKERS_MIN && r >= RSI_PRE_MIN && r <= RSI_PRE_MAX) {
-    // logic giữ nguyên như cũ, phía dưới mày có các if() riêng cho từng type
-  }
-  // rules (keep original thresholds)
-  if (v >= 3 && t >= 0.6 && (item.rsi_h4 && item.rsi_h4 > 50 ? true : r>48)) return 'GOLDEN';
-  if (v >= 2.5 && t >= 0.58 && item.price > ma20) return 'SPOT';
-  if (v >= 1.8 && t >= 0.52 && r >= 42 && r <= 55) return 'PREBREAK';
-  // IMF heuristics: big OI + funding swing + high leaderScore
-  if (item.oi && item.funding && item.leaderScore >= 85) {
-    // examine funding last record
-    try {
-      const f = Array.isArray(item.funding) ? Number(item.funding[item.funding.length-1].fundingRate || 0) : 0;
-      if (f >= 0.001 || (item.oi && Number(item.oi) > 0)) return 'IMF';
-    } catch(e){}
-  }
-  return 'NONE';
-}
-function computeSignal(item) {
-  const type = detectSignalType(item);
-  const ma20 = item.ma20 || item.price;
-  const zone = computeEntryZone(ma20);
-  const entry = item.price;
-  const sl = smartStop(entry, item.closes || []);
-  let tp = 0, conf = 0;
-  if (type === 'GOLDEN') { tp = 10; conf = Math.min(99, 70 + Math.round(item.leaderScore/1.2)); }
-  else if (type === 'SPOT') { tp = 6; conf = Math.min(95, 60 + Math.round(item.leaderScore/1.3)); }
-  else if (type === 'PREBREAK') { tp = 5; conf = Math.min(85, 50 + Math.round(item.leaderScore/1.5)); }
-  else if (type === 'IMF') { tp = 12; conf = Math.min(99, 80 + Math.round(item.leaderScore/1.1)); }
-  else { tp = 0; conf = 0; }
-  const marketTag = item.source === 'future' ? (item.correlation ? (item.correlation>0.5?'HYBRID':'FUTURE_ONLY') : 'FUTURE_ONLY') : (item.source === 'spot' ? 'SPOT_ONLY' : 'UNKNOWN');
-  return {
-    type, market: marketTag, entryLow: zone.entryLow, entryHigh: zone.entryHigh, sl, tp, confidence: conf
-  };
-}
-
-/* ====== ACTIVE SIGNALS persistence & scale logic ====== */
-const ACTIVE_PATH = path.join(DATA_DIR, 'active_signals.json');
-function loadActive(){
-  try { if (!fs.existsSync(ACTIVE_PATH)) return {}; return JSON.parse(fs.readFileSync(ACTIVE_PATH,'utf8')||'{}'); }
-  catch(e){ console.error('loadActive', e); return {}; }
-}
-function saveActive(obj){ try { fs.writeFileSync(ACTIVE_PATH, JSON.stringify(obj,null,2)); } catch(e){ console.error('saveActive', e); } }
-const VOL_FACTORS = { PREBREAK:0.2, SPOT:0.5, GOLDEN:1.0, IMF:1.5 };
-
-function buildSignalScaleMessage(rec, lastSig) {
-  const lines = [];
-  lines.push(`<b>${lastSig.type} | ${rec.symbol} | ${rec.marketType || ''}</b>`);
-  lines.push(`Signals: ${rec.signalCount} (last: ${lastSig.type} | conf:${lastSig.confidence}%)`);
-  lines.push(`Vùng entry: ${rec.entryLow || 'n/a'} - ${rec.entryHigh || 'n/a'} | Giá hiện: ${rec.entrySuggested}`);
-  lines.push(`Gợi ý Vol factor: ${rec.recommendedVolFactor}× (tham khảo)`);
-  lines.push(`Hold until: ${rec.holdUntil}`);
-  if (lastSig.type === 'PREBREAK') lines.push('Lưu ý: PRE -> dùng vol nhỏ, chờ confirm.');
-  if (lastSig.type === 'GOLDEN') lines.push('GOLDEN -> tín hiệu mạnh, cân nhắc tăng vol.');
-  if (lastSig.type === 'IMF') lines.push('IMF -> money flow lớn, scale up nếu hợp lý, canh SL.');
-  lines.push(`Time: ${nowISO()}`);
-  return lines.join('\n');
-}
-
-async function recordSignalAndDecide(item, sig) {
-  const act = loadActive();
-  const sym = item.symbol;
-  const now = nowISO();
-  const existing = act[sym] || null;
-  const lastSigObj = { type: sig.type, confidence: sig.confidence || 0, time: now };
-  // ===== SMART LAYER CHECK =====
-let learnStats = {};
-try {
-  learnStats = await LEARN.getStats?.() || {};
-} catch(e) {
-  console.log('[SMART] learning stats unavailable:', e.message);
-}
-
-const smart = evaluateSignal(
-  item,
-  sig.type || 'FUTURE',
-  DYNAMIC_CONFIG || {},
-  learnStats
-);
-
-sig.smart = smart;
-
-// Nếu Smart Layer không confirm -> bỏ qua tín hiệu
-if (!smart.confirm) {
-  console.log(`[SMART] ❌ Skip ${sym} | type=${sig.type} | score=${smart.score}`);
-  return { rec: existing, action: 'SKIP_SMART' };
-}
-
-// Nếu confirm thì tiếp tục như bình thường
-console.log(`[SMART] ✅ Confirm ${sym} | type=${sig.type} | score=${smart.score}`);
-  if (!existing) {
-    const rec = {
-      symbol: sym,
-      signals: [lastSigObj],
-      firstSignal: now,
-      lastSignal: now,
-      signalCount: 1,
-      marketType: sig.market || (item.source || 'HYBRID'),
-      entrySuggested: item.price || item.lastPrice || 0,
-      entryLow: sig.entryLow || null,
-      entryHigh: sig.entryHigh || null,
-      recommendedVolFactor: VOL_FACTORS[sig.type] || 0.5,
-      holdUntil: new Date(Date.now() + (sig.type==='IMF'?48: sig.type==='GOLDEN'?24 : sig.type==='SPOT'?12:6)*3600000).toISOString(),
-      status: 'ACTIVE'
-    };
-    act[sym] = rec; saveActive(act);
-    return { rec, action:'NEW', message: buildSignalScaleMessage(rec, lastSigObj) };
-  } else {
-    existing.signals.push(lastSigObj);
-    existing.lastSignal = now;
-    existing.signalCount = (existing.signalCount || 0) + 1;
-    const addFactor = (sig.type === 'GOLDEN' || sig.type === 'IMF') ? 0.5 : (sig.type === 'SPOT' ? 0.2 : 0.1);
-    existing.recommendedVolFactor = Math.min(3.0, (existing.recommendedVolFactor || VOL_FACTORS[sig.type]) + addFactor);
-    const extendH = (sig.type === 'GOLDEN' ? 12 : (sig.type === 'IMF' ? 24 : (sig.type === 'SPOT' ? 6 : 3)));
-    existing.holdUntil = new Date(Date.parse(existing.holdUntil) + extendH*3600000).toISOString();
-    if (sig.entryLow) existing.entryLow = sig.entryLow;
-    if (sig.entryHigh) existing.entryHigh = sig.entryHigh;
-    existing.status = 'ACTIVE';
-    act[sym] = existing; saveActive(act);
-    return { rec: existing, action:'UPDATE', message: buildSignalScaleMessage(existing, lastSigObj) };
-  }
-}
-
-/* ====== ALERT THROTTLE & DEDUPE ====== */
-// store last alerts in memory (also could persist)
-const lastAlert = {}; // key -> {ts, type, conf}
-function shouldSendNow(sym, type, conf=0) {
-  const key = `${sym}_${type}`;
-  const prev = lastAlert[key];
-  const now = Date.now();
-  if (!prev) return true;
-  const diffMin = (now - prev.ts)/60000;
-  if (prev.type !== type) return true;
-  if (diffMin > ALERT_DEDUPE_MIN) return true;
-  if (conf - (prev.conf||0) >= 8) return true; // allow update if confidence jump
-  return false;
-}
-function recordSent(sym, type, conf=0) {
-  const key = `${sym}_${type}`;
-  lastAlert[key] = { ts: Date.now(), type, conf };
-}
-
-/* ====== EXIT MONITOR (simple) ====== */
-async function checkExitForSymbol(sym) {
-  try {
-    const kl = await safeFetchJSON(`${API_BASE_FUTURE}/fapi/v1/klines?symbol=${encodeURIComponent(sym)}&interval=15m&limit=6`).catch(()=>null);
-    if (!kl) return null;
-    const closes = kl.map(r=>Number(r[4]));
-    const last = closes.at(-1), prev = closes.at(-2) || last;
-    const change15 = prev>0 ? ((last-prev)/prev)*100 : 0;
-    const vols = kl.map(r=>Number(r[5]));
-    const volNow = vols.at(-1) || 0;
-    const volAvg = sma(vols, Math.min(6, vols.length)) || 1;
-    const volSpike = volNow > volAvg * 1.8;
-    const reason = [];
-    if (change15 <= -3) reason.push('Fast 15m drop');
-    if (volSpike && change15 < -1) reason.push('Vol spike + pullback');
-    return { symbol: sym, last, change15: Number(change15.toFixed(2)), volSpike, reason, time: nowISO() };
-  } catch(e) { return null; }
-}
-
-/* ====== ENDPOINTS ====== */
-app.get('/', (req,res)=> res.json({ status:'Radar Hybrid OK', time: nowISO() }));
-
-// TEST endpoint to verify Telegram
-app.get('/test', async (req,res) => {
-  const msg = `<b>Radar Test</b>\nTime: ${new Date().toLocaleString()}\nURL: ${PRIMARY_URL}`;
-  const r = await sendTelegramRaw(msg);
-  res.json({ ok:true, tg: r });
-});
-
-// ANALYZE single symbol
-app.get('/signal', async (req,res) => {
-  try {
-    const s = (req.query.symbol || req.query.s || 'BTCUSDT').toUpperCase();
-    const prefer = (req.query.prefer || 'hybrid');
-    const a = await analyzeHybrid(s);
-    if (!a) return res.status(500).json({error:'no-data'});
-    const sig = computeSignal(a);
-    // record active & send depending
-    if (sig.type !== 'NONE') {
-      const decision = recordSignalAndDecide(Object.assign({symbol:s, price:a.price}, a), sig);
-      if (shouldSendNow(s, sig.type, sig.confidence) || decision.action === 'UPDATE') {
-        await sendTelegramRaw(decision.message);
-        recordSent(s, sig.type, sig.confidence);
-      }
-      return res.json({ analysis: a, signal: sig, decision });
-    } else {
-      // still log
-      const log = { symbol:s, time: nowISO(), analysis: a };
-      res.json({ analysis: a, signal: sig });
-    }
-  } catch(e){
-    res.status(500).json({ error: e.message || String(e) });
-  }
-});
-
-// BATCHSCAN (scan a list or exchangeInfo limited)
-app.get('/batchscan', async (req,res) => {
-  try {
-    // attempt to fetch exchangeInfo spot list (fallback static)
-    let symbols = [];
-    try {
-      const info = await safeFetchJSON(`${API_BASE_SPOT}/api/v3/exchangeInfo`);
-      symbols = info.symbols.filter(s=>s.quoteAsset==='USDT' && s.status==='TRADING').map(s=>s.symbol);
-    } catch(e){
-      symbols = Object.keys(LEADER_GROUPS).concat(...Object.values(LEADER_GROUPS)).slice(0,200);
-    }
-    const limit = Math.min(symbols.length, Number(req.query.limit||200));
-    const toScan = symbols.slice(0, limit);
-    const results = [];
-    await Promise.all(toScan.map(sym => limitP(async ()=>{
-      try {
-        const a = await analyzeHybrid(sym);
-        if (!a) return;
-        const sig = computeSignal(a);
-        // send only if strong or IMF
-        if ((sig.type !== 'NONE' && sig.confidence >= 75) || sig.type === 'IMF') {
-          const decision = recordSignalAndDecide(Object.assign({symbol:sym, price:a.price}, a), sig);
-          if (shouldSendNow(sym, sig.type, sig.confidence) || decision.action === 'UPDATE') {
-            await sendTelegramRaw(decision.message);
-            recordSent(sym, sig.type, sig.confidence);
-          }
-        }
-        results.push({ symbol: sym, signal: sig.type, conf: sig.confidence, score: a.leaderScore });
-      } catch(e) {}
-    })));
-    res.json({ scanned: toScan.length, results });
-  } catch(e){
-    res.status(500).json({ error: e.message || String(e) });
-  }
-});
-
-// LEADERCHAIN quick: detect leaders in LEADER_GROUPS
-app.get('/leaderchain', async (req,res) => {
-  try {
-    const groups = LEADER_GROUPS;
-    const leaders = [];
-    await Promise.all(Object.keys(groups).map(sym => limitP(async ()=>{
-      try {
-        const a = await analyzeHybrid(sym);
-        const sig = computeSignal(a);
-        if (sig.type === 'GOLDEN' || sig.type === 'SPOT' || sig.type === 'IMF') {
-          leaders.push({ leader: sym, type: sig.type, conf: sig.confidence, price: a.price, vol: a.vol_ratio, rsi: a.rsi_h1 });
-        }
-      } catch(e){}
-    })));
-    // for leaders, scan followers quickly
-    const resOut = [];
-    for (const L of leaders) {
-      const followers = LEADER_GROUPS[L.leader] || [];
-      const notStarted = [];
-      await Promise.all(followers.map(f => limitP(async ()=>{
-        try {
-          const a2 = await analyzeHybrid(f);
-          if (!a2) return;
-          if (a2.vol_ratio < 1.5 && a2.rsi_h1 < 50) notStarted.push({symbol:f, price: a2.price, vol: a2.vol_ratio, rsi: a2.rsi_h1});
-        } catch(e){}
-      })));
-      if (notStarted.length) {
-        const msg = `🚨 CHAIN ALERT\nLeader: ${L.leader} | ${L.type} | Price:${L.price} | Vol:${L.vol}\nFollowers chưa chạy: ${notStarted.map(x=>x.symbol).join(', ')}\nTime: ${nowISO()}`;
-        await sendTelegramRaw(msg);
-      }
-      resOut.push({ leader: L.leader, followers_not_started: notStarted });
-    }
-    res.json({ leaders, resOut });
-  } catch(e){ res.status(500).json({ error: e.message || String(e) }); }
-});
-
-// ACTIVE signals view
-app.get('/active', (req,res) => {
-  const act = loadActive();
-  res.json({ count: Object.keys(act).length, list: act });
-});
-
-// manual close
-app.post('/close', (req,res) => {
-  const sym = (req.body && req.body.symbol || '').toUpperCase();
-  if (!sym) return res.status(400).json({ error: 'symbol required' });
-  const act = loadActive();
-  if (!act[sym]) return res.status(404).json({ error: 'not found' });
-  act[sym].status = 'CLOSED'; act[sym].closedTime = nowISO(); saveActive(act);
-  sendTelegramRaw(`🛑 Position closed (manual) ${sym} | reason: ${req.body.reason || 'manual'}`);
-  res.json({ ok:true });
-});
-
-// manual scale
-app.post('/scale', (req,res) => {
-  const sym = (req.body && req.body.symbol || '').toUpperCase();
-  const factor = Number(req.body && req.body.factor || 0);
-  const act = loadActive();
-  if (!act[sym]) return res.status(404).json({ error: 'not found' });
-  act[sym].recommendedVolFactor = Math.min(3, (act[sym].recommendedVolFactor || 1) + factor);
-  act[sym].signals.push({ type:'MANUAL_SCALE', confidence:0, time: nowISO(), note: req.body.note || '' });
-  saveActive(act);
-  sendTelegramRaw(`🔁 Manual scale ${sym} -> new vol factor ${act[sym].recommendedVolFactor}×`);
-  res.json({ ok:true, newFactor: act[sym].recommendedVolFactor });
-});
-
-// exit check quick
-app.get('/exitcheck', async (req,res) => {
-  const sym = (req.query.symbol || 'BTCUSDT').toUpperCase();
-  const out = await checkExitForSymbol(sym);
-  res.json(out || { error:'no-data' });
-});
-
-/* ====== SIMPLE AUTO-LEARN / OPTIMIZER SKELETON (runs daily) ====== */
-const OPT_PATH = path.join(DATA_DIR, 'opt_stats.json');
-function loadOpt(){ try{ if (!fs.existsSync(OPT_PATH)) return {}; return JSON.parse(fs.readFileSync(OPT_PATH,'utf8')||'{}'); }catch(e){return{}} }
-function saveOpt(o){ try{ fs.writeFileSync(OPT_PATH, JSON.stringify(o,null,2)); }catch(e){console.error(e);} }
-
-async function optimizerDaily() {
-  try {
-    const opt = loadOpt();
-    // simple: count signals in active_signals.json and adjust weights (demo)
-    const act = loadActive();
-    for (const sym of Object.keys(act)) {
-      const rec = act[sym];
-      // naive scoring
-      const wins = (opt[sym] && opt[sym].wins) || 0;
-      const loses = (opt[sym] && opt[sym].loses) || 0;
-      opt[sym] = { wins, loses, lastChecked: nowISO() };
-    }
-    saveOpt(opt);
-    console.log('optimizerDaily done at', nowISO());
-  } catch(e){ console.error('optimizerDaily err', e); }
-}
-// run once per 24h (but also can be triggered externally)
-setInterval(()=>{ optimizerDaily().catch(()=>{}); }, 24*3600*1000);
-
-/* ====== SELF PING (keep alive) ====== */
-setInterval(()=>{ if (PRIMARY_URL) fetch(PRIMARY_URL).catch(()=>{}); }, 9*60*1000);
-
-/* ====== LEARNING SCHEDULER ====== */
-setInterval(async ()=>{
-  try {
-    const n = await LEARN.checkOutcomesForPending();
-    if (n > 0) {
-      console.log(`[LEARN] checked ${n} signals`);
-    }
-
-    const adjust = await LEARN.computeAdjustments();
-    if (adjust.adjust) {
-  console.log('[LEARN] adjustments suggested:', adjust);
-  await LEARN.applyAdjustments(adjust.changes);
-}
-  } catch (e) {
-    console.error('learning scheduler error', e);
-  }
-}, Number(process.env.LEARNING_POLL_MINUTES || 30) * 60 * 1000);
-
-/* ====== AUTO RELOAD CONFIG ====== */
-import { readFileSync } from 'fs';
-let dynamicConfig = {};
-
-function loadDynamicConfig(){
-  try {
-    const raw = readFileSync('./data/dynamic_config.json', 'utf8');
-    dynamicConfig = JSON.parse(raw);
-    console.log('[CONFIG] dynamic config loaded:', dynamicConfig);
-  } catch(e){
-    console.warn('[CONFIG] no dynamic_config.json yet');
-  }
-}
-
-// Load ban đầu
-loadDynamicConfig();
-
-// Tự reload mỗi 5 phút
-setInterval(loadDynamicConfig, 5 * 60 * 1000);
-
-// ====== FUTURE SMART MODE v2 (Fixed version) ======
-async function safeFetchJSON_FUTV2(url){    // ← đổi tên FUTURE -> FUTV2
-  try {
-    const res = await fetch(url);
-    if(!res.ok) return null;
-    return await res.json();
-  } catch(e) { 
-    return null; 
-  }
-}
-
-function smaFUTURE(arr, n=20){              // ← đổi tên sma -> smaFUTURE
+// ---- Indicators helpers ----
+function sma(arr, n = 20) {
   if(!arr || arr.length < 1) return null;
   const slice = arr.slice(-n);
-  const sum = slice.reduce((s, x) => s + Number(x), 0);
+  const sum = slice.reduce((s,x)=>s + Number(x), 0);
   return sum / slice.length;
 }
+function computeRSI(closes, period = 14) {
+  if(!closes || closes.length <= period) return null;
+  let gains = 0, losses = 0;
+  for(let i=1;i<=period;i++){
+    const d = closes[i] - closes[i-1];
+    if(d>0) gains += d; else losses -= d;
+  }
+  let avgGain = gains/period;
+  let avgLoss = losses/period || 1;
+  for(let i=period+1;i<closes.length;i++){
+    const d = closes[i] - closes[i-1];
+    avgGain = (avgGain*(period-1) + Math.max(0,d))/period;
+    avgLoss = (avgLoss*(period-1) + Math.max(0,-d))/period;
+  }
+  if(avgLoss === 0) return 100;
+  const rs = avgGain/avgLoss;
+  return 100 - (100/(1+rs));
+}
+function fmt(n){ return typeof n === 'number' ? Number(n.toFixed(8)) : n; }
 
-function computeFutureEntryZone(ma20){
-  if(!ma20) return { entryLow:null, entryHigh:null };
-  const low = +(ma20 * 0.995).toFixed(8);
-  const high = +(ma20 * 1.005).toFixed(8);  // ±0.5%
-  return { entryLow: low, entryHigh: high };
+// ---- Auto-load USDT symbols (filtered) ----
+let SYMBOLS = [];
+let lastSymbolsTs = 0;
+async function loadSymbols({minVol=SYMBOL_MIN_VOL, minChange=SYMBOL_MIN_CHANGE} = {}) {
+  try{
+    const now = Date.now()/1000;
+    if(lastSymbolsTs + SYMBOL_REFRESH_H*3600 > now && SYMBOLS.length) {
+      return SYMBOLS;
+    }
+    const url = `${API_BASE_SPOT}/api/v3/ticker/24hr`;
+    const data = await safeFetchJSON(url, 2);
+    if(!Array.isArray(data)) return SYMBOLS;
+    const syms = data
+      .filter(s=> s.symbol && s.symbol.endsWith('USDT'))
+      .filter(s=> !/UPUSDT|DOWNUSDT|BULLUSDT|BEARUSDT|_/.test(s.symbol)) // exclude weird
+      .map(s=> ({ symbol: s.symbol, vol: Number(s.quoteVolume||0), change: Number(s.priceChangePercent||0) }))
+      .filter(s => s.vol >= minVol && s.change >= minChange)
+      .sort((a,b)=> b.vol - a.vol)
+      .map(s => s.symbol);
+    SYMBOLS = syms;
+    lastSymbolsTs = now;
+    logv(`[SYMBOLS] loaded ${SYMBOLS.length} USDT pairs (vol>=${minVol}, change>=${minChange}%)`);
+    return SYMBOLS;
+  }catch(e){
+    logv('[SYMBOLS] load error ' + e.message);
+    return SYMBOLS;
+  }
 }
 
-function computeSlTp(entry, mode='GOLDEN'){
+// ---- Active entries tracking (RAM + JSON) ----
+const activeSpots = new Map();
+function loadActiveFile() {
+  try{
+    if(fs.existsSync(ACTIVE_FILE)) {
+      const raw = fs.readFileSync(ACTIVE_FILE,'utf8');
+      const obj = JSON.parse(raw || '{}');
+      for(const [k,v] of Object.entries(obj)) activeSpots.set(k,v);
+      logv(`[ENTRY_TRACK] loaded ${activeSpots.size} active entries from file`);
+    }
+  }catch(e){
+    logv('[ENTRY_TRACK] load file error ' + e.message);
+  }
+}
+function saveActiveFile() {
+  try{
+    const obj = Object.fromEntries(activeSpots);
+    fs.writeFileSync(ACTIVE_FILE, JSON.stringify(obj, null, 2));
+  }catch(e){ logv('[ENTRY_TRACK] save error ' + e.message); }
+}
+async function markSpotEntry(symbol, type, meta={}) {
+  activeSpots.set(symbol, { type, markedAt: Date.now(), meta });
+  saveActiveFile();
+  // old detailed log style:
+  logv(`[MARK ENTRY] symbol=${symbol} type=${type} price=${meta.price} ma20=${meta.ma20} vol=${meta.vol} rsi=${meta.rsi} change24=${meta.change24}`);
+}
+function clearSpotEntry(symbol) {
+  if(activeSpots.has(symbol)) {
+    activeSpots.delete(symbol);
+    saveActiveFile();
+    logv(`[CLEAR ENTRY] symbol=${symbol}`);
+  }
+}
+
+// ---- Compute Entry zone & SL/TP ----
+function computeEntryZoneFromMA(ma20) {
+  if(!ma20) return { entryLow:null, entryHigh:null };
+  return { entryLow: fmt(ma20 * 0.995), entryHigh: fmt(ma20 * 1.02) };
+}
+function computeSLTP(entry, type) {
+  // Use conservative defaults; can be tuned later/learning
   const cfg = {
-    PRE: { slPct: 0.008, tpPct: 0.04 },
-    GOLDEN: { slPct: 0.02, tpPct: 0.08 }
-  }[mode] || { slPct: 0.02, tpPct: 0.08 };
-  const sl = +(entry * (1 - cfg.slPct)).toFixed(8);
-  const tp = +(entry * (1 + cfg.tpPct)).toFixed(8);
+    PRE: { slPct: 0.01, tpPct: 0.05 },
+    SPOT: { slPct: 0.015, tpPct: 0.06 },
+    GOLDEN: { slPct: 0.02, tpPct: 0.10 },
+    IMF: { slPct: 0.03, tpPct: 0.15 }
+  }[type] || { slPct: 0.02, tpPct: 0.08 };
+  const sl = fmt(entry * (1 - cfg.slPct));
+  const tp = fmt(entry * (1 + cfg.tpPct));
   return { sl, tp, slPct: cfg.slPct, tpPct: cfg.tpPct };
 }
-// ====== FUTURE EXIT ALERT (Smart Auto Close Detect) ======
-function detectFutureExit({
-  symbol,
-  entry,
-  ma20,
-  fundingNow,
-  fundingPrev,
-  side
-}) {
-  let exitReason = null;
 
-  // Funding đảo chiều
-  if (typeof fundingNow === "number" && typeof fundingPrev === "number") {
-    if (fundingNow * fundingPrev < 0) {
-      exitReason = "⚠️ Funding đảo chiều";
-    }
-  }
-
-  // Cắt MA20 ngược hướng
-  if (ma20 && entry) {
-    if (side === "LONG" && ma20 > entry * 1.002) {
-      exitReason = "📉 Giá cắt xuống MA20";
-    }
-    if (side === "SHORT" && ma20 < entry * 0.998) {
-      exitReason = "📈 Giá cắt lên MA20";
-    }
-  }
-
-  if (exitReason) {
-  const msg = [
-    `📉 FUTURE EXIT ALERT – ${symbol}`,
-    `Reason: ${exitReason}`,
-    `Entry: ${entry}`,
-    `MA20: ${ma20}`,
-    `Funding: ${fundingNow}`
-  ].join("\n");
-
-  // Thay vì gọi Spot Mode trực tiếp, ta gọi Smart Delay Switch
-  if (process.env.SPOT_MODE_URL) {
-    smartDelaySwitch(symbol, 'EXIT');
-  }
-
-  sendTelegram(msg);
-}
-}
-function formatFutureMessage({symbol, kind, entry, entryLow, entryHigh, sl, tp, funding, conf}) {
+// ---- Build Telegram message (dạng cũ chi tiết) ----
+function buildEntryMsg({symbol, type, entry, entryLow, entryHigh, sl, tp, ma20, vol, change24, rsi, extra=''}){
   const lines = [];
-  lines.push(`🔥 FUTURE ALERT — ${symbol}`);
-  lines.push(`Type: ${kind}`);
-  lines.push(`Entry: ${entryLow && entryHigh ? `${entryLow}–${entryHigh}` : entry}`);
-  lines.push(`SL: ${sl} | TP: ${tp}`);
-  if(typeof funding !== 'undefined') lines.push(`Funding: ${funding}`);
-  if(typeof conf !== 'undefined') lines.push(`Confidence: ${Math.round(conf)}%`);
-  lines.push(`(Market: FUTURE, Mode: Tight-GOLDEN)`);
+  lines.push(`<b>[SPOT] ${type} | ${symbol}</b>`);
+  if(entryLow && entryHigh) lines.push(`Vùng entry: ${entryLow} - ${entryHigh}`);
+  else lines.push(`Giá hiện: ${entry}`);
+  lines.push(`MA20: ${fmt(ma20)} | RSI: ${rsi?.toFixed(1) || 'NA'}`);
+  lines.push(`Vol(24h): ${Number(vol).toFixed(0)} | 24h: ${change24}%`);
+  lines.push(`SL: ${sl} (${( (1-sl/entry)*100 ).toFixed(2)}%) | TP: ${tp} (${( (tp/entry-1)*100 ).toFixed(2)}%)`);
+  if(extra) lines.push(`Note: ${extra}`);
+  lines.push(`Time: ${new Date().toLocaleString('vi-VN')}`);
   return lines.join('\n');
 }
 
-async function sendFutureSmartAlert(sym, opts={modePreference:'both'}) {
-  console.log('[FUT_DEBUG] sendFutureSmartAlert start', { API_BASE_FUTURE: !!process.env.API_BASE_FUTURE });
-  if(!process.env.API_BASE_FUTURE) return null;
+// ---- Analyze one symbol for entry ----
+async function analyzeSymbol(sym) {
+  try{
+    const kUrl = `${API_BASE_SPOT}/api/v3/klines?symbol=${sym}&interval=1h&limit=60`;
+    const tUrl = `${API_BASE_SPOT}/api/v3/ticker/24hr?symbol=${sym}`;
+    const [kjson, tjson] = await Promise.all([safeFetchJSON(kUrl), safeFetchJSON(tUrl)]);
+    if(!kjson || !tjson) return null;
 
-  const urlK = `${process.env.API_BASE_FUTURE}/fapi/v1/klines?symbol=${sym}&interval=1h&limit=60`;
-  const urlT = `${process.env.API_BASE_FUTURE}/fapi/v1/ticker/24hr?symbol=${sym}`;
-  const urlFund = `${process.env.API_BASE_FUTURE}/fapi/v1/premiumIndex?symbol=${sym}`;
+    const closes = kjson.map(c => Number(c[4]));
+    const ma20 = sma(closes, 20) || closes.at(-1);
+    const price = Number(tjson.lastPrice || closes.at(-1));
+    const change24 = Number(tjson.priceChangePercent || 0);
+    const vol = Number(tjson.quoteVolume || 0);
+    const rsi = computeRSI(closes.slice(-30)) || 50;
 
-  const [kjson, tjson, fjson] = await Promise.all([
-  safeFetchJSON_FUTV2(urlK),
-  safeFetchJSON_FUTV2(urlT),
-  safeFetchJSON_FUTV2(urlFund)
-]);
-  if(!kjson || !tjson) return null;
+    // Rules (as discussed)
+    // PRE: price within [ma20*0.995, ma20*1.02], moderate positive change, vol spike + taker bias (approximated)
+    // SPOT (confirm): vol higher, rsi moderate, price > ma20
+    // GOLDEN: strong breakout: price > ma20*1.03 and change24 >= 6 (as before)
+    // IMF: special independent flow detection: huge vol spike + taker dominance (approx)
+    const entryZone = computeEntryZoneFromMA(ma20);
+    const nearEntry = price >= entryZone.entryLow && price <= entryZone.entryHigh;
+    const isGolden = price > ma20 * 1.03 && change24 >= 6;
+    const isSpotConfirm = (price > ma20 && vol > Math.max(1, sma(kjson.map(c=>c[5]), 20) * 1.8) && rsi >= 50 && rsi <= 60);
+    const isPre = nearEntry && vol > Math.max(1, sma(kjson.map(c=>c[5]), 20) * 1.2) && rsi >= 45 && rsi <= 55;
+    // IMF: identify if last hour vol >> average and price slightly above ma20
+    const vols = kjson.map(c=> Number(c[5]));
+    const volAvg = sma(vols, Math.min(vols.length, 20)) || 1;
+    const volNow = vols.at(-1) || 0;
+    const isIMF = volNow > Math.max(1, volAvg * 3) && price > ma20 * 0.995;
 
-  const closes = kjson.map(r => Number(r[4]));
-  const price = Number(tjson.lastPrice || closes.at(-1));
-  const ma20 = sma(closes, 20);
-  const entryZone = computeFutureEntryZone(ma20);
-  const funding = fjson?.lastFundingRate || 0;
+    // priority: IMF > GOLDEN > SPOT > PRE
+    let chosen = null;
+    if(isIMF) chosen = 'IMF';
+    else if(isGolden) chosen = 'GOLDEN';
+    else if(isSpotConfirm) chosen = 'SPOT';
+    else if(isPre) chosen = 'PRE';
 
-  const change24 = Number(tjson.priceChangePercent || 0);
-  const nearEntry = price <= entryZone.entryHigh && price >= entryZone.entryLow;
-  const isGolden = (price > ma20 * 1.03 && change24 >= 6);
-  const isPre = nearEntry && change24 > 0.5 && change24 < 6 && funding < 0.0015;
+    if(!chosen) return null;
 
-  let conf = isGolden ? Math.min(99, 70 + change24 * 2) : (isPre ? 45 + change24 * 2 : 0);
-  const results = [];
-
-  if(isPre && (opts.modePreference === 'both' || opts.modePreference === 'pre')){
     const entry = price;
-    const { sl, tp } = computeSlTp(entry, 'PRE');
-    const msg = formatFutureMessage({symbol: sym, kind:'PRE_FUTURE', entry, sl, tp, funding, conf});
-   console.log('[FUT_DEBUG] (isPre) push msg', { symbol, price, ma20, isPre, nearEntry, conf });
-    results.push(msg);
-    try { await sendTelegram(msg); } catch(e){ console.error('[PRE FUTURE ALERT] fail', e); }
+    const { sl, tp } = computeSLTP(entry, chosen);
+    const msg = buildEntryMsg({symbol: sym, type: chosen, entry, entryLow: entryZone.entryLow, entryHigh: entryZone.entryHigh, sl, tp, ma20, vol, change24, rsi});
+    // send (detailed)
+    await sendTelegram(msg);
+    // detailed old-style log
+    logv(`[ALERT] Type=${chosen} Symbol=${sym} Price=${entry} MA20=${fmt(ma20)} RSI=${rsi?.toFixed(1)} Vol=${vol} 24h%=${change24} SL=${sl} TP=${tp}`);
+    // mark active entry
+    await markSpotEntry(sym, chosen, { price: entry, ma20: fmt(ma20), vol, change24, rsi });
+    return { sym, chosen, entry };
+  }catch(e){
+    logv(`[ANALYZE] ${sym} error ${e.message}`);
+    return null;
   }
-
-  if(isGolden && (opts.modePreference === 'both' || opts.modePreference === 'golden')){
-    const entry = price;
-    const { sl, tp } = computeSlTp(entry, 'GOLDEN');
-    const msg = formatFutureMessage({symbol: sym, kind:'GOLDEN_FUTURE', entry, sl, tp, funding, conf});
-    console.log('[FUT_DEBUG] (isGolden) push msg', { symbol, price, ma20, isGolden, nearEntry, conf });
-    results.push(msg);
-    try { await sendTelegram(msg); } catch(e){ console.error('[GOLDEN FUTURE ALERT] fail', e); }
-  }
-
-  return results;
 }
-/* ====== END FUTURE SMART MODE /* ===== START SERVER ===== */
-app.get('/', (req, res) => {
-  res.send('Radar Worker Running ✅');
-});
 
-app.listen(PORT, () => {
-  console.log(`✅ Radar Worker running on port ${PORT}`);
-});
-// ===== SMART DELAY SWITCH (Future → Spot) =====
-async function smartDelaySwitch(sym, reason) {
-  const delaySec = 30 + Math.floor(Math.random() * 30); // delay ngẫu nhiên 30–60s
-  console.log(`[DELAY] Waiting ${delaySec}s before checking Spot switch...`);
-
-  setTimeout(async () => {
-    try {
-      const res = await fetch(`${process.env.SPOT_MODE_URL}/activate`);
-      if (res.ok) {
-        console.log(`[AUTO-SWITCH] Spot Radar Mode kích hoạt sau ${delaySec}s`);
-      } else {
-        console.warn(`[AUTO-SWITCH] Không kích hoạt được Spot Mode`);
-      }
-    } catch (err) {
-      console.error(`[AUTO-SWITCH] Lỗi khi gọi Spot Mode:`, err);
+// ---- Exit detection (track only active entries) ----
+async function detectExitForActive(sym, data) {
+  try{
+    const kUrl = `${API_BASE_SPOT}/api/v3/klines?symbol=${sym}&interval=1h&limit=40`;
+    const kjson = await safeFetchJSON(kUrl);
+    if(!kjson) return;
+    const closes = kjson.map(c=>Number(c[4]));
+    const ma20 = sma(closes, 20) || closes.at(-1);
+    const price = closes.at(-1);
+    const rsiNow = computeRSI(closes.slice(-30)) || 50;
+    let exitReason = null;
+    if(data.type === 'GOLDEN') {
+      if(price < ma20 * 0.998) exitReason = 'Giá cắt xuống MA20';
+    } else if(data.type === 'SPOT' || data.type === 'PRE') {
+      // PRE: rsi collapse; SPOT: rsi collapse or price drop under ma20
+      const rsiPrev = computeRSI(closes.slice(-31,-1)) || 50;
+      if(rsiPrev > 50 && rsiNow < 45) exitReason = 'RSI giảm mạnh';
+      if(price < ma20 * 0.995) exitReason = 'Giá giảm xuyên MA20';
+    } else if(data.type === 'IMF') {
+      // IMF: aggressive, exit on any strong rejection
+      if(price < ma20 * 0.995 || rsiNow < 45) exitReason = 'IMF rejection / RSI giảm';
     }
-  }, delaySec * 1000);
+
+    if(exitReason) {
+      const msg = [
+        `<b>[SPOT EXIT] (${data.type}) ${sym}</b>`,
+        `Reason: ${exitReason}`,
+        `EntryAt: ${data.meta?.price || 'NA'}`,
+        `Now: ${price}`,
+        `MA20: ${fmt(ma20)} | RSI: ${rsiNow?.toFixed(1)}`,
+        `Time: ${new Date().toLocaleString('vi-VN')}`
+      ].join('\n');
+      await sendTelegram(msg);
+      logv(`[EXIT] ${sym} type=${data.type} reason=${exitReason} now=${price}`);
+      clearSpotEntry(sym);
+    }
+  }catch(e){
+    logv(`[EXIT_CHECK] ${sym} err ${e.message}`);
+  }
 }
 
-// === TEST EXIT ALERT ===
-detectFutureExit({
-  symbol: "BTCUSDT",
-  entry: 108000,
-  ma20: 109000,
-  fundingNow: -0.001,
-  fundingPrev: 0.002,
-  side: "LONG"
-});
-// === Keep Render awake ===
-import https from 'https';
-const KEEP_ALIVE_INTERVAL = process.env.KEEP_ALIVE_INTERVAL || 10;
+// ---- Main scan loop ----
+let scanning = false;
+async function scanOnce() {
+  if(scanning) return;
+  scanning = true;
+  try{
+    await loadSymbols(); // refresh if needed
+    if(SYMBOLS.length === 0) {
+      // fallback: a short list (if initial load failed)
+      SYMBOLS = ['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT'];
+    }
+    logv(`[SCAN] start scanning ${SYMBOLS.length} symbols`);
+    // analyze each symbol for new entry (call all that match)
+    for(const sym of SYMBOLS){
+      try{
+        await analyzeSymbol(sym);
+      }catch(e){
+        logv(`[SCAN] analyze ${sym} error ${e.message}`);
+      }
+      // small delay to avoid being rate-limited
+      await new Promise(r=>setTimeout(r, 250));
+    }
+    // then check exits for active entries
+    if(activeSpots.size>0) {
+      logv(`[EXIT_SCAN] checking ${activeSpots.size} actives`);
+      for(const [sym, data] of activeSpots.entries()){
+        await detectExitForActive(sym, data);
+        await new Promise(r=>setTimeout(r, 250));
+      }
+    }
+    logv('[SCAN] cycle complete');
+  }catch(e){
+    logv('[SCAN] fatal error ' + e.message);
+  }finally{
+    scanning = false;
+  }
+}
 
-setInterval(() => {
-  https.get(process.env.PRIMARY_URL || 'https://radar-worker-yte4.onrender.com');
-  console.log(`[KeepAlive] Ping sent to self at ${new Date().toLocaleTimeString()}`);
-}, KEEP_ALIVE_INTERVAL * 60 * 1000);
+// ---- Init load active file ----
+loadActiveFile();
+
+// ---- Scheduler ----
+setInterval(scanOnce, SCAN_INTERVAL_MS);
+await scanOnce(); // run immediate at start
+
+// ---- Keep-alive ping to PRIMARY_URL to keep Render awake ----
+if(PRIMARY_URL) {
+  setInterval(()=>{
+    try {
+      https.get(PRIMARY_URL);
+      logv('[KEEPALIVE] ping sent to PRIMARY_URL');
+    }catch(e){}
+  }, KEEP_ALIVE_INTERVAL * 60 * 1000);
+}
+
+// ---- Expose minimal express for healthcheck if needed (optional) ----
+import express from "express";
+const app = express();
+app.get('/', (req,res)=> res.send('Spot Smart Radar OK'));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, ()=> logv(`Server listening on port ${PORT}`));
