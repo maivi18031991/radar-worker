@@ -33,7 +33,7 @@ const sendTelegram = async (text) => {
 // Gửi thông báo khi server khởi động
 sendTelegram("✅ Radar Worker has started successfully on Render!");
 /* ====== CONFIG ====== */
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT || 30000;
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || "";
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "";
 const PRIMARY_URL = process.env.PRIMARY_URL || `http://localhost:${PORT}`;
