@@ -95,4 +95,4 @@ function evaluateSignal(item, type, config) {
 
   return out;
 }
-module.exports = { evaluateSignal };
+export { evaluateSignal };
