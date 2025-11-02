@@ -1,496 +1,469 @@
-// server_v2.9.mjs
-// Spot SmartMoney Breakout v2.9 - Hybrid Confirm (High Winrate)
-// Requires Node >= 16 (ESM). Run: node server_v2.9.mjs
+// server_v3.5_master_adaptive_full.mjs
+// SPOT MASTER AI v3.5 - Adaptive, SmartMoney, Decouple, Multi-TF, Per-symbol alerts, Auto-learning
+// Node >=16. npm i node-fetch@2 express
 
-import fetch from 'node-fetch';
-import fs from 'fs';
-import path from 'path';
-import https from 'https';
-import express from 'express';
+import fetch from "node-fetch";
+import fs from "fs";
+import path from "path";
+import https from "https";
+import express from "express";
 
-/// ===== ENV & CONFIG =====
-const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || '';
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
-const API_BASE_SPOT = process.env.API_BASE_SPOT || 'https://api.binance.com';
-const API_BASE_FUT = process.env.API_BASE_FUT || 'https://fapi.binance.com';
-const PRIMARY_URL = process.env.PRIMARY_URL || '';
-const PORT = process.env.PORT || 3000;
-const SCAN_INTERVAL_MS = (Number(process.env.SCAN_INTERVAL_SEC) || 60) * 1000;
-const SYMBOL_REFRESH_H = Number(process.env.SYMBOL_REFRESH_H || 6);
-const SYMBOL_MIN_VOL = Number(process.env.SYMBOL_MIN_VOL || 10000000);
-const ACTIVE_FILE = path.resolve('./active_symbols.json');
-const LOG_FILE = path.resolve('./spot_logs.txt');
-const SIGNAL_STORE = path.resolve('./signals_store.json');
-const CFG_FILE = path.resolve('./config_auto.json');
+/// -------- CONFIG (preset by user's choices) ----------
+let SCAN_INTERVAL_SEC = 60;            // base 60s
+const MIN_VOL_24H = 5_000_000;         // include midcap
+const ALERT_COOLDOWN_MIN = 15;         // per-symbol cooldown
+const SYMBOL_REFRESH_H = 6;
+const API_BASE_SPOT = process.env.API_BASE_SPOT || "https://api.binance.com";
+const API_BASE_FUTURE = process.env.API_BASE_FUTURE || ""; // optional
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || process.env.TELEGRAM_BOT_TOKEN || "";
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || process.env.TELEGRAM_CHAT || "";
+const PRIMARY_URL = process.env.PRIMARY_URL || "";
+const KEEP_ALIVE_MIN = Number(process.env.KEEP_ALIVE_INTERVAL || 10);
+const AUTO_LEARN_48H_MS = 48 * 3600 * 1000;
+const AUTO_LEARN_7D_MS = 7 * 24 * 3600 * 1000;
+const SIGNAL_STORE_FILE = path.resolve("./signals_store.json");
+const ACTIVE_FILE = path.resolve("./active_symbols.json");
+const LOG_FILE = path.resolve("./spot_logs.txt");
 
-/// ===== DEFAULT CFG =====
-const DEFAULT_CFG = {
-  version: 1,
-  VOL_SPIKE_MULT: 1.8,
-  TAKER_MIN: 0.52,
-  GOLDEN_CHANGE24: 4,
-  NEARENTRY_LO: 0.992,
-  NEARENTRY_HI: 1.03,
-  COOLDOWNS: { PRE:5, SPOT:10, GOLDEN:15, IMF:20, EXIT:5 },
-  EVALUATION_LOOKBACK_HOURS: 72,
-  MIN_SIGNALS_TO_ADJUST: 3,
-  ADJUST_STEP: 0.05,
-  TARGET_WINRATE: 0.75,
-  MULTI_TF_CONFIRM: true,
-  KEEP_LOG_FILE: true
-};
-
-let CFG = loadCFG();
-
-/// ===== Utilities =====
-function nowStr(){ return new Date().toLocaleString('vi-VN'); }
-function fmt(n){ return (typeof n === 'number') ? Number(n.toFixed(8)) : n; }
-function logv(msg){
-  const s = `[${nowStr()}] ${msg}`;
-  console.log(s);
-  if(CFG.KEEP_LOG_FILE){
-    try{ fs.appendFileSync(LOG_FILE, s + '\n'); } catch(e){}
-  }
-}
-
-async function safeFetchJSON(url, retries=2){
-  for(let i=0;i<retries;i++){
-    try{
-      const r = await fetch(url);
-      if(!r.ok){ logv(`[HTTP] ${r.status} ${url}`); await new Promise(r=>setTimeout(r,200*(i+1))); continue; }
-      return await r.json();
-    }catch(e){
-      logv('[HTTP] err '+ e.message + ' url=' + url);
-      await new Promise(r=>setTimeout(r,200*(i+1)));
-    }
-  }
-  return null;
-}
-async function safeFetchJSON_FUT(url, retries=2){
-  for(let i=0;i<retries;i++){
-    try{
-      const r = await fetch(url);
-      if(!r.ok){ logv(`[HTTP-FUT] ${r.status} ${url}`); await new Promise(r=>setTimeout(r,300*(i+1))); continue; }
-      return await r.json();
-    }catch(e){
-      logv('[HTTP-FUT] err '+ e.message + ' url=' + url);
-      await new Promise(r=>setTimeout(r,300*(i+1)));
-    }
-  }
-  return null;
-}
-
-function sma(arr, n=20){ if(!arr||arr.length<1) return null; const s = arr.slice(-n).reduce((a,b)=>a+Number(b),0); return s/Math.min(n, arr.length); }
-function computeRSI(closes, period=14){
-  if(!closes||closes.length<=period) return null;
-  let gains=0, losses=0;
-  for(let i=1;i<=period;i++){ const d=closes[i]-closes[i-1]; if(d>0) gains+=d; else losses-=d; }
-  let avgG=gains/period, avgL=losses/period||1;
-  for(let i=period+1;i<closes.length;i++){
-    const d=closes[i]-closes[i-1];
-    avgG=(avgG*(period-1)+Math.max(0,d))/period;
-    avgL=(avgL*(period-1)+Math.max(0,-d))/period;
-  }
-  if(avgL===0) return 100;
-  const rs=avgG/avgL; return 100-(100/(1+rs));
-}
-function pearsonCorr(a,b){
-  if(!a||!b||a.length!==b.length||a.length===0) return 0;
-  const n=a.length;
-  const ma=a.reduce((s,x)=>s+x,0)/n, mb=b.reduce((s,x)=>s+x,0)/n;
-  let num=0, da=0, db=0;
-  for(let i=0;i<n;i++){ const x=a[i]-ma, y=b[i]-mb; num+=x*y; da+=x*x; db+=y*y; }
-  return num/Math.sqrt(Math.max(1,da*db));
-}
-function computeSR(kjson, window=20){
-  const slice = kjson.slice(-window);
-  const highs = slice.map(r=>Number(r[2])), lows = slice.map(r=>Number(r[3]));
-  return { resistance: Math.max(...highs), support: Math.min(...lows), pivot: (Math.max(...highs)+Math.min(...lows))/2 };
-}
-function computeTakerRatio(tjson){
-  try{
-    const takerBuy = Number(tjson.takerBuyQuoteAssetVolume || tjson.takerBuyBaseVolume || 0);
-    const quoteVol = Number(tjson.quoteVolume || tjson.volume || 0);
-    if(quoteVol<=0) return 0.5;
-    return Math.min(1, Math.max(0, takerBuy / quoteVol));
-  }catch(e){ return 0.5; }
-}
-
-/// ===== CFG & Signals store =====
-function loadCFG(){
-  try{
-    if(!fs.existsSync(CFG_FILE)){ fs.writeFileSync(CFG_FILE, JSON.stringify(DEFAULT_CFG, null,2)); return JSON.parse(JSON.stringify(DEFAULT_CFG)); }
-    const c = JSON.parse(fs.readFileSync(CFG_FILE,'utf8'));
-    return Object.assign(JSON.parse(JSON.stringify(DEFAULT_CFG)), c);
-  }catch(e){ logv('[CFG] load err '+ e.message); return JSON.parse(JSON.stringify(DEFAULT_CFG)); }
-}
-function saveCFG(){ try{ fs.writeFileSync(CFG_FILE, JSON.stringify(CFG, null,2)); }catch(e){ logv('[CFG] save err '+ e.message); } }
-function loadSignals(){
-  try{ if(!fs.existsSync(SIGNAL_STORE)) return []; const s = JSON.parse(fs.readFileSync(SIGNAL_STORE,'utf8')||'[]'); return s; }catch(e){ return []; }
-}
-function saveSignals(arr){ try{ fs.writeFileSync(SIGNAL_STORE, JSON.stringify(arr, null,2)); }catch(e){ logv('[LEARN] save err '+ e.message); } }
-
-async function recordSignal(sig){
-  try{
-    const arr = loadSignals();
-    arr.push(Object.assign({ recordedAt: Date.now() }, sig));
-    if(arr.length>20000) arr.shift();
-    saveSignals(arr);
-    logv(`[LEARN] recorded ${sig.symbol} ${sig.type}`);
-  }catch(e){ logv('[LEARN] record err '+ e.message); }
-}
-
-/// ===== SYMBOLS loader =====
+/// -------- internal state ----------
 let SYMBOLS = [];
 let lastSymbolsTs = 0;
-async function loadSymbols(minVol=SYMBOL_MIN_VOL, minChange=1){
-  try{
-    const now = Date.now()/1000;
-    if(lastSymbolsTs + SYMBOL_REFRESH_H*3600 > now && SYMBOLS.length) return SYMBOLS;
-    const url = `${API_BASE_SPOT}/api/v3/ticker/24hr`;
-    const data = await safeFetchJSON(url, 2);
-    if(!Array.isArray(data)) return SYMBOLS;
-    const syms = data
-      .filter(s=> s.symbol && s.symbol.endsWith('USDT'))
-      .filter(s=> !/UPUSDT|DOWNUSDT|BULLUSDT|BEARUSDT|_/.test(s.symbol))
-      .map(s=> ({ symbol: s.symbol, vol: Number(s.quoteVolume||0), change: Number(s.priceChangePercent||0) }))
-      .filter(s=> s.vol >= minVol && Math.abs(s.change) >= minChange)
-      .sort((a,b)=> b.vol - a.vol)
-      .map(s=> s.symbol);
-    SYMBOLS = syms;
-    lastSymbolsTs = now;
-    logv(`[SYMBOLS] loaded ${SYMBOLS.length}`);
-    return SYMBOLS;
-  }catch(e){ logv('[SYMBOL] load err '+ e.message); return SYMBOLS; }
-}
+const ALERT_MEMORY = new Map();   // key: `${level}:${symbol}` -> timestamp
+const activeSpots = new Map();    // symbol -> { type, meta }
+let scanning = false;
+let adaptiveTimer = null;
+let lastScanStart = 0;
+let btcCache = { ts: 0, data: null }; // cache BTC 24h ticker
+const LEADERS = ["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT"]; // altflow calc
 
-/// ===== ACTIVE entries storage =====
-const activeMap = new Map();
-function loadActive(){
-  try{
-    if(!fs.existsSync(ACTIVE_FILE)) return;
-    const obj = JSON.parse(fs.readFileSync(ACTIVE_FILE,'utf8')||'{}');
-    for(const k of Object.keys(obj)) activeMap.set(k, obj[k]);
-    logv(`[ACTIVE] loaded ${activeMap.size}`);
-  }catch(e){ logv('[ACTIVE] load err '+ e.message); }
+/// -------- helpers ----------
+function logv(msg){
+  const s = `[${new Date().toLocaleString('vi-VN')}] ${msg}`;
+  console.log(s);
+  try{ fs.appendFileSync(LOG_FILE, s + "\n"); } catch(e){}
 }
-function saveActive(){
-  try{ const obj = Object.fromEntries(activeMap); fs.writeFileSync(ACTIVE_FILE, JSON.stringify(obj, null,2)); }catch(e){ logv('[ACTIVE] save err '+ e.message); }
-}
-function markActive(sym, type, meta){
-  activeMap.set(sym, { type, markedAt: Date.now(), meta });
-  saveActive();
-  logv(`[MARK] ${sym} ${type}`);
-}
-function clearActive(sym){
-  if(activeMap.has(sym)){ activeMap.delete(sym); saveActive(); logv(`[CLEAR] ${sym}`); }
-}
-
-/// ===== Tele send =====
 async function sendTelegram(text){
-  if(!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID){ logv('[TELE] missing token/chat'); return false; }
+  if(!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) { logv('[TELEGRAM] missing token/chat'); return; }
   const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
   const payload = { chat_id: TELEGRAM_CHAT_ID, text, parse_mode: 'HTML', disable_web_page_preview: true };
   try{
-    const r = await fetch(url, { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(payload) });
-    if(!r.ok) { logv(`[TELE] send failed ${r.status}`); return false; }
-    return true;
-  }catch(e){ logv('[TELE] err '+ e.message); return false; }
+    const res = await fetch(url, { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(payload) });
+    if(!res.ok) logv(`[TELEGRAM] send failed ${res.status}`);
+  }catch(e){ logv('[TELEGRAM] error ' + (e.message||e)); }
+}
+async function safeFetchJSON(url, retries=2){
+  for(let i=0;i<retries;i++){
+    try{
+      const r = await fetch(url, { timeout: 15000 });
+      if(!r.ok){ logv(`[HTTP] ${r.status} ${url}`); await new Promise(r=>setTimeout(r,200*(i+1))); continue; }
+      return await r.json();
+    }catch(e){ logv('[HTTP] fetch err ' + (e.message||e) + ' url=' + url); await new Promise(r=>setTimeout(r,200*(i+1))); }
+  }
+  return null;
+}
+function sma(arr, n=20){ if(!Array.isArray(arr)||arr.length===0) return null; const slice=arr.slice(-n); return slice.reduce((s,x)=>s+Number(x),0)/slice.length; }
+function computeRSI(closes, period=14){
+  if(!closes || closes.length<=period) return 50;
+  let gains=0, losses=0;
+  for(let i=1;i<=period;i++){ const d=closes[i]-closes[i-1]; if(d>0) gains+=d; else losses -= d; }
+  let avgG=gains/period, avgL=(losses||1)/period;
+  for(let i=period+1;i<closes.length;i++){ const d=closes[i]-closes[i-1]; avgG=(avgG*(period-1)+Math.max(0,d))/period; avgL=(avgL*(period-1)+Math.max(0,-d))/period; }
+  if(avgL===0) return 100; const rs=avgG/avgL; return 100 - (100/(1+rs));
+}
+function fmt(n,d=8){ return typeof n==='number'? Number(n.toFixed(d)): n; }
+function canSendAlert(symbol, level='SPOT'){
+  const key = `${level}:${symbol}`; const now=Date.now(); const last = ALERT_MEMORY.get(key)||0; const diffMin=(now-last)/60000;
+  if(diffMin >= ALERT_COOLDOWN_MIN){ ALERT_MEMORY.set(key, now); return true; } return false;
+}
+function loadActiveFile(){ try{ if(fs.existsSync(ACTIVE_FILE)){ const raw=fs.readFileSync(ACTIVE_FILE,'utf8'); const obj=JSON.parse(raw||'{}'); for(const k of Object.keys(obj)) activeSpots.set(k,obj[k]); logv(`[ENTRY_TRACK] loaded ${activeSpots.size} actives`); } }catch(e){ logv('loadActive err '+e.message); } }
+function saveActiveFile(){ try{ fs.writeFileSync(ACTIVE_FILE, JSON.stringify(Object.fromEntries(activeSpots), null, 2)); }catch(e){ logv('saveActive err '+e.message); } }
+function storeSignal(sig){ try{ const arr = fs.existsSync(SIGNAL_STORE_FILE) ? JSON.parse(fs.readFileSync(SIGNAL_STORE_FILE,'utf8')||'[]') : []; arr.push(sig); if(arr.length>30000) arr.splice(0, arr.length-20000); fs.writeFileSync(SIGNAL_STORE_FILE, JSON.stringify(arr,null,2)); }catch(e){ logv('storeSignal err '+e.message); } }
+
+/// ---------- Symbols loader ----------
+async function loadSymbols(minVol = MIN_VOL_24H){
+  try{
+    const now = Date.now()/1000;
+    if(lastSymbolsTs + SYMBOL_REFRESH_H*3600 > now && SYMBOLS.length) return SYMBOLS;
+    const data = await safeFetchJSON(`${API_BASE_SPOT}/api/v3/ticker/24hr`, 2);
+    if(!Array.isArray(data)) return SYMBOLS;
+    const syms = data
+      .filter(s => s.symbol && s.symbol.endsWith('USDT'))
+      .filter(s => !/UPUSDT|DOWNUSDT|BULLUSDT|BEARUSDT|_/.test(s.symbol))
+      .map(s => ({ symbol: s.symbol, vol: Number(s.quoteVolume||0), change: Number(s.priceChangePercent||0) }))
+      .filter(s => s.vol >= minVol)
+      .sort((a,b)=> b.vol - a.vol)
+      .map(s => s.symbol);
+    SYMBOLS = syms;
+    lastSymbolsTs = now;
+    logv(`[SYMBOLS] loaded ${SYMBOLS.length} USDT pairs (minVol=${minVol})`);
+    return SYMBOLS;
+  }catch(e){ logv('loadSymbols err ' + e.message); return SYMBOLS; }
 }
 
-/// ===== cooldown per symbol/type =====
-const lastAlert = new Map();
-function canSend(sym, type){
+/// ---------- Altflow (SmartMoney) ----------
+async function computeAltflow(){
   try{
-    const cd = (CFG.COOLDOWNS && CFG.COOLDOWNS[type]) ? CFG.COOLDOWNS[type] : 10;
-    const key = `${type}:${sym}`;
+    const urls = LEADERS.map(sym => `${API_BASE_SPOT}/api/v3/ticker/24hr?symbol=${sym}`);
+    const arr = await Promise.all(urls.map(u => safeFetchJSON(u,1)));
+    const vols = arr.map(j => Number(j?.quoteVolume||0));
+    const volAvgs = arr.map(j => Number(j?.weightedAvgPrice||1)); // not perfect but quick
+    const ratio = vols.reduce((s,x)=>s+(x||0),0) / Math.max(1, LEADERS.length * 1); // simple sum
+    // We'll compute a normalized altflow: average of vol ratios vs median
+    const avgVol = vols.reduce((s,x)=>s+x,0)/Math.max(1,vols.length);
+    const altflow = avgVol ? (avgVol / Math.max(1, 1e6)) : 1; // crude: used relatively only
+    // Instead: compute percent change average
+    const changeArr = arr.map(j => Number(j?.priceChangePercent||0));
+    const avgChange = changeArr.reduce((s,x)=>s+x,0)/Math.max(1,changeArr.length);
+    return { altflowIndex: Math.max(0, avgChange), avgVol };
+  }catch(e){ return { altflowIndex: 0, avgVol: 0 }; }
+}
+
+/// ---------- Decouple detection ----------
+function pearsonCorr(a,b){
+  if(!a||!b||a.length<2||a.length!==b.length) return 1;
+  const n=a.length; const ma=a.reduce((s,x)=>s+x,0)/n; const mb=b.reduce((s,x)=>s+x,0)/n;
+  let num=0, sa=0, sb=0;
+  for(let i=0;i<n;i++){ const da=a[i]-ma, db=b[i]-mb; num += da*db; sa += da*da; sb += db*db; }
+  const den = Math.sqrt(sa*sb); return den===0?0: num/den;
+}
+async function checkDecouple(sym, change24Alt, closesAlt){
+  try{
+    // get BTC 24h change and BTC closes H1
     const now = Date.now();
-    const last = lastAlert.get(key) || 0;
-    if((now - last)/60000 >= cd){ lastAlert.set(key, now); return true; }
-    return false;
-  }catch(e){ return true; }
+    let btcChange24 = 0; let kBTC = null;
+    if(btcCache.ts + 60*1000 > now && btcCache.data){ btcChange24 = Number(btcCache.data.priceChangePercent||0); }
+    else {
+      const tb = await safeFetchJSON(`${API_BASE_SPOT}/api/v3/ticker/24hr?symbol=BTCUSDT`,1);
+      btcCache.data = tb; btcCache.ts = Date.now(); btcChange24 = Number(tb?.priceChangePercent||0);
+    }
+    kBTC = await safeFetchJSON(`${API_BASE_SPOT}/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=48`,1) || [];
+    const closesBTC = kBTC.map(r=>Number(r[4]));
+    let corr = 1;
+    try{
+      const L = Math.min(24, closesAlt.length, closesBTC.length);
+      if(L>=6){
+        const a=[], b=[];
+        for(let i=closesAlt.length-L;i<closesAlt.length;i++){
+          if(i<=0) continue;
+          a.push((closesAlt[i]-closesAlt[i-1])/closesAlt[i-1]);
+          const idx = closesBTC.length - (closesAlt.length - i);
+          const bi = closesBTC[idx] ?? closesBTC.at(-1);
+          const bip = closesBTC[idx-1] ?? closesBTC.at(-2);
+          if(bip) b.push((bi-bip)/bip);
+        }
+        corr = Math.abs(pearsonCorr(a,b)) || 0;
+      }
+    }catch(e){ corr = 1; }
+    const decouple = (change24Alt >= 3.0 && btcChange24 <= -1.5 && corr < 0.25);
+    return { decouple, corr, btcChange24 };
+  }catch(e){ return { decouple:false, corr:1, btcChange24:0 }; }
 }
 
-/// ===== FUTURE helper =====
-async function fetchFutureMetrics(sym){
+/// ---------- Future quick bias (optional) ----------
+async function futureBias(sym){
   try{
-    const kUrl = `${API_BASE_FUT}/fapi/v1/klines?symbol=${sym}&interval=1h&limit=60`;
-    const tUrl = `${API_BASE_FUT}/fapi/v1/ticker/24hr?symbol=${sym}`;
-    const oiUrl = `${API_BASE_FUT}/fapi/v1/openInterest?symbol=${sym}`;
-    const fundUrl = `${API_BASE_FUT}/fapi/v1/premiumIndex?symbol=${sym}`;
-    const [kjson, tjson, oiJson, fundJson] = await Promise.all([
-      safeFetchJSON_FUT(kUrl), safeFetchJSON_FUT(tUrl), safeFetchJSON_FUT(oiUrl), safeFetchJSON_FUT(fundUrl)
-    ]);
-    return { kjson, tjson, oiJson, fundJson };
-  }catch(e){ return {}; }
+    if(!API_BASE_FUTURE) return { ok:false };
+    const t = await safeFetchJSON(`${API_BASE_FUTURE}/fapi/v1/ticker/24hr?symbol=${sym}`,1);
+    const f = await safeFetchJSON(`${API_BASE_FUTURE}/fapi/v1/premiumIndex?symbol=${sym}`,1);
+    if(!t) return { ok:false };
+    return { ok:true, change: Number(t.priceChangePercent||0), funding: Number(f?.lastFundingRate||0) };
+  }catch(e){ return { ok:false }; }
 }
 
-/// ===== Analyze symbol with v2.9 rules =====
-async function analyzeSymbol(sym){
+/// ---------- SR detection ----------
+function detectSRFromH1(kjson){
+  try{
+    const n = Math.min(20, kjson.length);
+    const highs = kjson.slice(-n).map(r=>Number(r[2])); const lows = kjson.slice(-n).map(r=>Number(r[3]));
+    return { resistance: fmt(Math.max(...highs),6), support: fmt(Math.min(...lows),6) };
+  }catch(e){ return { resistance:null, support:null }; }
+}
+
+/// ---------- compute SL/TP ----------
+function computeSLTP(entry, type){
+  const cfg = {
+    PRE: { slPct: 0.01, tpPct: 0.05 },
+    SPOT: { slPct: 0.015, tpPct: 0.06 },
+    GOLDEN: { slPct: 0.02, tpPct: 0.10 },
+    IMF: { slPct: 0.03, tpPct: 0.15 },
+  }[type] || { slPct: 0.02, tpPct: 0.08 };
+  return { sl: fmt(entry*(1-cfg.slPct)), tp: fmt(entry*(1+cfg.tpPct)), slPct: cfg.slPct, tpPct: cfg.tpPct };
+}
+
+/// ---------- analyze one symbol ----------
+async function analyzeSymbol(sym, riskState = { type:'balanced', volMult:1.6, changeMin:3.0, confMin:50 }){
   try{
     const kUrl = `${API_BASE_SPOT}/api/v3/klines?symbol=${sym}&interval=1h&limit=60`;
     const tUrl = `${API_BASE_SPOT}/api/v3/ticker/24hr?symbol=${sym}`;
-    const kUrl15 = `${API_BASE_SPOT}/api/v3/klines?symbol=${sym}&interval=15m&limit=60`;
-    const kUrlBTC = `${API_BASE_SPOT}/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=60`;
+    const [kjson, tjson] = await Promise.all([ safeFetchJSON(kUrl,2), safeFetchJSON(tUrl,2) ]);
+    if(!kjson || !tjson) return null;
 
-    const [kjson, tjson, k15json, kBTC] = await Promise.all([safeFetchJSON(kUrl), safeFetchJSON(tUrl), safeFetchJSON(kUrl15), safeFetchJSON(kUrlBTC)]);
-    if(!kjson || !tjson || !k15json || !kBTC) return;
-
-    const closes = kjson.map(r=>Number(r[4]));
-    const vols = kjson.map(r=>Number(r[5]));
+    const closes = kjson.map(c => Number(c[4]));
+    const ma20 = sma(closes,20) || closes.at(-1);
     const price = Number(tjson.lastPrice || closes.at(-1));
     const change24 = Number(tjson.priceChangePercent || 0);
-    const volNow = vols.at(-1)||0;
-    const volAvg = Math.max(1, sma(vols, 20) || 1);
-    const ma20 = sma(closes,20) || closes.at(-1);
-    const rsi = computeRSI(closes.slice(-30)) || 50;
-    const taker = computeTakerRatio(tjson) || 0.5;
-    const sr = computeSR(kjson, 20);
-    // leader corr (recent)
-    const btcCloses = kBTC.map(r=>Number(r[4]));
-    const L = Math.min(24, closes.length, btcCloses.length);
-    const retA=[], retB=[];
-    for(let i=closes.length-L;i<closes.length;i++){
-      if(i<=0) continue;
-      retA.push((closes[i]-closes[i-1])/closes[i-1]);
-      const bi = btcCloses[btcCloses.length-(closes.length-i)];
-      const bip = btcCloses[btcCloses.length-(closes.length-i)-1];
-      if(bip) retB.push((bi-bip)/bip);
-    }
-    const leaderCorr = Math.abs(pearsonCorr(retA, retB))||0;
+    const vol24 = Number(tjson.quoteVolume || 0);
+    const volsH1 = kjson.map(c=>Number(c[5]||0));
+    const volAvgH1 = Math.max(1, sma(volsH1, Math.min(volsH1.length,20)));
+    const volNow = volsH1.at(-1) || 0;
+    const rsiH1 = computeRSI(closes.slice(-30),14) || 50;
 
-    // future metrics
-    const fut = await fetchFutureMetrics(sym);
-    const futFund = fut.fundJson ? Number(fut.fundJson.lastFundingRate||0) : 0;
-    const futOI = fut.oiJson ? Number(fut.oiJson.openInterest||0) : 0;
-    const futPrice = fut.tjson ? Number(fut.tjson.lastPrice||price) : price;
+    // TF confirm
+    const k5 = await safeFetchJSON(`${API_BASE_SPOT}/api/v3/klines?symbol=${sym}&interval=5m&limit=12`,1) || [];
+    const k15 = await safeFetchJSON(`${API_BASE_SPOT}/api/v3/klines?symbol=${sym}&interval=15m&limit=12`,1) || [];
+    const closes5 = k5.map(r=>Number(r[4])); const closes15 = k15.map(r=>Number(r[4]));
+    const rsi5 = computeRSI(closes5,14) || 50; const rsi15 = computeRSI(closes15,14) || 50;
+    const ma5 = sma(closes5,20) || price; const ma15 = sma(closes15,20) || price;
+    const tfConfirm = (rsi5>50 && closes5.at(-1)>ma5 && rsi15>50 && closes15.at(-1)>ma15);
 
-    // BASIC NOISE FILTERS
-    if(rsi < 30 || rsi > 90) return;
-    if(Math.abs(change24) > 50) return; // crazy coins
-    // SmartMoney signals
-    const volSpike = volNow > volAvg * (CFG.VOL_SPIKE_MULT || 1.8);
-    const takerOk = taker > (CFG.TAKER_MIN || 0.52);
-    const futureLongBias = futFund > 0.0003 || (futOI > 0 && futPrice > ma20*1.01);
+    // entry zone
+    const entryZone = { entryLow: fmt(ma20*0.995), entryHigh: fmt(ma20*1.02) };
+    const nearEntry = price >= entryZone.entryLow && price <= entryZone.entryHigh;
+    const volRatio = volAvgH1>0 ? (volNow/volAvgH1) : 1;
 
-    const nearEntry = price >= ma20*(CFG.NEARENTRY_LO||0.992) && price <= ma20*(CFG.NEARENTRY_HI||1.03);
+    // conditions
+    const isGolden = (price > ma20 * 1.03 && change24 >= Math.max(4, riskState.changeMin));
+    const isSpotConfirm = (price > ma20 && volNow > Math.max(1, volAvgH1 * riskState.volMult) && rsiH1 >= 50 && rsiH1 <= 70);
+    const isPre = (nearEntry && volNow > Math.max(1, volAvgH1 * 1.2) && rsiH1 >= 45 && rsiH1 <= 55);
+    const isIMF = (volNow > Math.max(1, volAvgH1 * 3) && price > ma20 * 0.995);
 
-    // FAKE BREAKOUT conditions
-    const fakeBreak1 = (price > ma20 * 1.05 && volNow < volAvg * 1.2);
-    const fakeBreak2 = (rsi > 80 && volNow < volAvg * 1.3);
-    const fakeBreak3 = (futFund > 0.0015); // FOMO unrealistic
-    if(fakeBreak1 || fakeBreak2 || fakeBreak3) {
-      logv(`[FAKE] ${sym} filtered (fakeBreak) rsi=${rsi} volNow=${volNow} volAvg=${volAvg} futFund=${futFund}`);
-      return;
-    }
+    const sr = detectSRFromH1(kjson);
+    const dec = await checkDecouple(sym, change24, closes);
+    const fut = await futureBias(sym);
 
-    // DEFINE SIGNALS
-    const isIMF = volSpike && (takerOk || leaderCorr > 0.45) && price > ma20*0.995;
-    const isGolden = (price > sr.resistance*1.005 && change24 >= (CFG.GOLDEN_CHANGE24||4) && volSpike && (takerOk || futureLongBias) && leaderCorr > 0.35 && price <= ma20*1.05);
-    const isSpot = (price > ma20*1.002 && volNow > volAvg*1.6 && rsi >= 48 && rsi <= 72 && (takerOk || leaderCorr>0.25));
-    const isPre = (nearEntry && volNow > volAvg*1.1 && rsi >= 42 && rsi <= 60 && (leaderCorr>0.15 || takerOk));
+    // confidence building
+    let conf = 0;
+    if(isIMF) conf += 30;
+    if(isGolden) conf += 25;
+    if(isSpotConfirm) conf += 18;
+    if(isPre) conf += 10;
+    conf += Math.min(20, Math.round((volRatio-1)*12));
+    if(tfConfirm) conf += 8;
+    if(dec.decouple) conf += 12;
+    if(fut.ok && fut.funding && fut.funding > 0) conf += 8;
 
-    // Multi-timeframe confirm (15m)
-    let tfConfirm = true;
-    if(CFG.MULTI_TF_CONFIRM){
-      try{
-        const closes15 = k15json.map(r=>Number(r[4]));
-        const ma20_15 = sma(closes15,20) || closes15.at(-1);
-        const rsi15 = computeRSI(closes15.slice(-30)) || 50;
-        if(isSpot && rsi15 < 45) tfConfirm = false;
-        if(isGolden && !(closes15.at(-1) > ma20_15*1.0)) tfConfirm = false;
-        // PRE can be allowed without 15m confirm
-      }catch(e){ tfConfirm = true; }
-    }
-
-    // PRIORITY: IMF > GOLDEN > SPOT > PRE
+    // final threshold
+    const confThreshold = riskState.confMin || 50;
+    // choose priority: IMF > GOLDEN > SPOT > PRE
     let chosen = null;
-    if(isIMF && canSend(sym,'IMF')) chosen = 'IMF';
-    else if(isGolden && tfConfirm && canSend(sym,'GOLDEN')) chosen = 'GOLDEN';
-    else if(isSpot && tfConfirm && canSend(sym,'SPOT')) chosen = 'SPOT';
-    else if(isPre && canSend(sym,'PRE')) chosen = 'PRE';
+    if(isIMF && conf >= confThreshold) chosen = 'IMF';
+    else if(isGolden && conf >= confThreshold) chosen = 'GOLDEN';
+    else if(isSpotConfirm && conf >= confThreshold) chosen = 'SPOT';
+    else if(isPre && conf >= Math.max(35, confThreshold-10)) chosen = 'PRE';
+    if(!chosen) return null;
 
-    if(!chosen) return;
+    // adjust SL if decoupled (tighter)
+    let { sl, tp, slPct, tpPct } = computeSLTP(price, chosen);
+    if(dec.decouple && dec.btcChange24 < -1.0){ slPct = slPct*0.7; sl = fmt(price*(1-slPct)); }
 
-    // HOLD ABOVE MA check for GOLDEN (require hold on last 3 H1)
-    if(chosen === 'GOLDEN'){
-      const last3 = closes.slice(-3);
-      if(last3.length===3 && !(last3.every(c=>c>ma20))) { logv(`[GOLDEN-FILTER] ${sym} not hold 3H1`); return; }
+    // ensure per-symbol cooldown
+    if(!canSendAlert(sym, chosen)){
+      if(!activeSpots.has(sym)){
+        activeSpots.set(sym, { type: chosen, meta:{ price, ma20:fmt(ma20), vol24, change24, rsiH1, conf } });
+        saveActiveFile();
+      }
+      return null;
     }
 
-    // compute SL/TP
-    const entry = price;
-    const { sl, tp } = (()=>{
-      const map = { PRE:{slPct:0.01,tpPct:0.05}, SPOT:{slPct:0.015,tpPct:0.06}, GOLDEN:{slPct:0.02,tpPct:0.10}, IMF:{slPct:0.03,tpPct:0.15} };
-      const cfg = map[chosen] || map.SPOT;
-      return { sl: fmt(entry*(1-cfg.slPct)), tp: fmt(entry*(1+cfg.tpPct)), slPct: cfg.slPct, tpPct: cfg.tpPct };
-    })();
-
-    // confidence scoring
-    let conf = 50;
-    if(volSpike) conf += 12;
-    if(takerOk) conf += 8;
-    if(futureLongBias) conf += 8;
-    if(leaderCorr>0.4) conf += 10;
-    if(isGolden) conf += 12;
-    if(isIMF) conf += 15;
-    conf = Math.min(99, Math.round(conf));
-
-    // Build message
+    // build message
     const lines = [];
-    const emoji = (chosen==='IMF') ? '🔥⚡' : (chosen==='GOLDEN' ? '✨' : (chosen==='SPOT' ? '✅' : '🔎'));
-    lines.push(`<b>${emoji} [${chosen}] ${sym}</b>`);
-    lines.push(`Price: ${entry} | MA20: ${fmt(ma20)} | Conf: ${conf}%`);
-    lines.push(`EntryZone(SR): ${fmt(sr.support)} - ${fmt(sr.resistance)}`);
-    lines.push(`SL: ${sl} | TP: ${tp}`);
-    lines.push(`VolNow:${Math.round(volNow)} VolAvg:${Math.round(volAvg)} | 24h:${change24}%`);
-    lines.push(`Taker:${(taker*100).toFixed(1)}% | Funding:${futFund} | OI:${futOI}`);
-    lines.push(`leaderCorr:${(leaderCorr*100).toFixed(1)}% | Time: ${nowStr()}`);
+    lines.push(`<b>[SPOT] ${chosen} | ${sym}</b>`);
+    if(entryZone.entryLow && entryZone.entryHigh) lines.push(`EntryZone: ${entryZone.entryLow} - ${entryZone.entryHigh}`);
+    else lines.push(`Price: ${fmt(price)}`);
+    lines.push(`MA20: ${fmt(ma20)} | RSI(H1): ${rsiH1?.toFixed(1)}`);
+    lines.push(`Vol24: ${Number(vol24).toFixed(0)} | VolNow: ${Number(volNow).toFixed(0)} (${volRatio.toFixed(2)}x)`);
+    lines.push(`24h%: ${fmt(change24,4)}% | Conf: ${Math.round(conf)}%`);
+    if(sr.resistance) lines.push(`SR: R:${sr.resistance} | S:${sr.support}`);
+    if(dec.decouple) lines.push(`#DECOUPLE BTC:${fmt(dec.btcChange24,2)}% | Corr:${(dec.corr*100).toFixed(0)}%`);
+    if(fut.ok) lines.push(`FUT: funding:${fmt(fut.funding,6)} | change:${fmt(fut.change,2)}%`);
+    lines.push(`SL: ${fmt(sl)} | TP: ${fmt(tp)} | Time: ${new Date().toLocaleString('vi-VN')}`);
+    // trailing note for learning (client will apply trailing manually)
+    lines.push(`Note: Auto-learning ON | SendType: per-symbol`);
 
     const msg = lines.join('\n');
 
-    // send & record
     await sendTelegram(msg);
-    await recordSignal({ symbol: sym, type: chosen, timeISO: new Date().toISOString(), price: entry, rsi, vol: volNow, change24, slPct: (sl/entry-1)*-1, tpPct:(tp/entry-1), conf });
-
-    markActive(sym, chosen, { price: entry, ma20: fmt(ma20), rsi, vol: volNow, change24, conf });
-    logv(`[ALERT] ${chosen} ${sym} sent conf=${conf}`);
-  }catch(e){
-    logv(`[ANALYZE] ${sym} err ${e.message}`);
-  }
+    logv(`[ALERT] ${chosen} ${sym} price=${price} conf=${Math.round(conf)} volRatio=${volRatio.toFixed(2)}`);
+    const sig = { time: new Date().toISOString(), symbol: sym, type: chosen, price, ma20:fmt(ma20), vol24, change24, conf, meta:{ sr, dec, fut } };
+    storeSignal(sig);
+    activeSpots.set(sym, { type: chosen, meta: sig });
+    saveActiveFile();
+    return { sym, chosen, conf };
+  }catch(e){ logv(`[ANALYZE] ${sym} err ${e.message||e}`); return null; }
 }
 
-/// ===== EXIT detection for actives =====
-async function detectExitFor(sym, data){
+/// ---------- Exit detection ----------
+async function detectExitForActive(sym, data){
   try{
     const kUrl = `${API_BASE_SPOT}/api/v3/klines?symbol=${sym}&interval=1h&limit=40`;
-    const kjson = await safeFetchJSON(kUrl);
+    const kjson = await safeFetchJSON(kUrl,1);
     if(!kjson) return;
-    const closes = kjson.map(r=>Number(r[4]));
+    const closes = kjson.map(c=>Number(c[4]));
     const ma20 = sma(closes,20) || closes.at(-1);
     const price = closes.at(-1);
-    const rsiNow = computeRSI(closes.slice(-30)) || 50;
-    let reason = null;
-    if(data.type==='GOLDEN'){ if(price < ma20*0.998) reason = 'Price cut below MA20'; }
-    else if(data.type==='SPOT' || data.type==='PRE'){
-      const rsiPrev = computeRSI(closes.slice(-31,-1)) || 50;
-      if(rsiPrev > 50 && rsiNow < 45) reason = 'RSI collapse';
-      if(price < ma20*0.995) reason = 'Price broke MA20';
-    } else if(data.type==='IMF'){
-      if(price < ma20*0.995 || rsiNow < 45) reason = 'IMF rejection';
+    const rsiNow = computeRSI(closes.slice(-30),14) || 50;
+    let exitReason = null;
+    if(data.type === 'GOLDEN'){ if(price < ma20 * 0.998) exitReason = 'Giá cắt xuống MA20'; }
+    else if(data.type === 'SPOT' || data.type === 'PRE'){
+      const rsiPrev = computeRSI(closes.slice(-31,-1),14) || 50;
+      if(rsiPrev > 50 && rsiNow < 45) exitReason = 'RSI giảm mạnh';
+      if(price < ma20 * 0.995) exitReason = 'Giá giảm xuyên MA20';
+    } else if(data.type === 'IMF'){
+      if(price < ma20 * 0.995 || rsiNow < 45) exitReason = 'IMF rejection / RSI giảm';
     }
-    if(reason){
-      const msg = `<b>[SPOT EXIT] (${data.type}) ${sym}</b>\nReason: ${reason}\nEntryAt: ${data.meta?.price||'NA'}\nNow: ${price}\nMA20:${fmt(ma20)} | RSI:${rsiNow.toFixed(1)}\nTime: ${nowStr()}`;
+    if(exitReason){
+      const msg = [
+        `<b>[SPOT EXIT] (${data.type}) ${sym}</b>`,
+        `Reason: ${exitReason}`,
+        `EntryAt: ${data.meta?.price || 'NA'}`,
+        `Now: ${price}`,
+        `MA20: ${fmt(ma20)} | RSI: ${rsiNow?.toFixed(1)}`,
+        `Time: ${new Date().toLocaleString('vi-VN')}`
+      ].join('\n');
       await sendTelegram(msg);
-      clearActive(sym);
+      logv(`[EXIT] ${sym} ${data.type} reason=${exitReason}`);
+      activeSpots.delete(sym); saveActiveFile();
     }
-  }catch(e){ logv('[EXIT] '+ e.message); }
+  }catch(e){ logv(`[EXIT_CHECK] ${sym} err ${e.message||e}`); }
 }
 
-/// ===== LEARNING scheduler & adjustments =====
-async function evaluateSignalOutcome(sig){
+/// ---------- Adaptive scan loop ----------
+async function getMarketState(){
   try{
-    const lookbackHours = CFG.EVALUATION_LOOKBACK_HOURS || 72;
-    const limit = Math.min(200, lookbackHours + 10);
-    const url = `${API_BASE_SPOT}/api/v3/klines?symbol=${sig.symbol}&interval=1h&limit=${limit}`;
-    const arr = await safeFetchJSON(url, 2);
-    if(!arr) return { result: 'UNKNOWN' };
-    const t0 = new Date(sig.timeISO).getTime();
-    let startIdx = 0;
-    for(let i=0;i<arr.length;i++){ if(Number(arr[i][0]) >= t0) { startIdx = i; break; } }
-    const checkCount = Math.min(arr.length - startIdx, Math.ceil(lookbackHours));
-    if(checkCount <= 0) return { result: 'NEUTRAL' };
-    const tp = sig.price * (1 + (sig.tpPct || 0.06));
-    const sl = sig.price * (1 - (sig.slPct || 0.02));
-    for(let i=startIdx;i<startIdx+checkCount;i++){
-      const high = Number(arr[i][2]), low = Number(arr[i][3]);
-      if(high >= tp && low <= sl) return { result: 'AMBIG' };
-      if(high >= tp) return { result: 'WIN' };
-      if(low <= sl) return { result: 'LOSE' };
-    }
-    return { result: 'NEUTRAL' };
-  }catch(e){ return { result: 'ERR' }; }
+    const btcTick = await safeFetchJSON(`${API_BASE_SPOT}/api/v3/ticker/24hr?symbol=BTCUSDT`,1);
+    const btcCh = Math.abs(Number(btcTick?.priceChangePercent || 0));
+    const altflow = await computeAltflow();
+    // determine risk
+    if(btcCh > 2.0 || altflow.altflowIndex > 2.0) return { type:'aggressive', scanSec:30, volMult:1.4, changeMin:2.5, confMin:48 };
+    if(btcCh < 0.5 && Math.abs(altflow.altflowIndex) < 0.8) return { type:'safe', scanSec:120, volMult:2.2, changeMin:4.5, confMin:60 };
+    return { type:'balanced', scanSec:60, volMult:1.6, changeMin:3.0, confMin:52 };
+  }catch(e){ return { type:'balanced', scanSec:60, volMult:1.6, changeMin:3.0, confMin:52 }; }
 }
-
-async function checkOutcomesAndAdjust(){
+async function adaptiveScan(){
   try{
-    const arr = loadSignals();
-    let updated = 0;
-    for(const s of arr){
-      if(s.evaluatedAt) continue;
-      if(Date.now() - new Date(s.timeISO).getTime() < 3600000) continue; // wait 1h
-      const r = await evaluateSignalOutcome(s);
-      s.evaluatedAt = Date.now(); s.evalResult = r.result; updated++;
-      await new Promise(r=>setTimeout(r,150));
-    }
-    if(updated) { saveSignals(arr); logv(`[LEARN] evaluated ${updated}`); }
-    // compute adjustments
-    const byType = {};
-    const lookback = (CFG.EVALUATION_LOOKBACK_HOURS||72) * 3600000;
-    const now = Date.now();
-    for(const s of arr){ if(!s.evaluatedAt) continue; if(now - s.recordedAt > lookback) continue;
-      const t = s.type || 'SPOT'; if(!byType[t]) byType[t]={win:0,lose:0,total:0}; byType[t].total++;
-      if(s.evalResult==='WIN') byType[t].win++; else if(s.evalResult==='LOSE') byType[t].lose++;
-    }
-    let changed = false;
-    for(const [t,st] of Object.entries(byType)){
-      if(st.total < (CFG.MIN_SIGNALS_TO_ADJUST||3)) continue;
-      const wr = st.win / st.total;
-      if(wr < (CFG.TARGET_WINRATE||0.75)){
-        // tighten
-        CFG.VOL_SPIKE_MULT = +(CFG.VOL_SPIKE_MULT * (1 + (CFG.ADJUST_STEP||0.05))).toFixed(3);
-        CFG.TAKER_MIN = +(Math.min(0.99, CFG.TAKER_MIN * (1 + (CFG.ADJUST_STEP||0.05)))).toFixed(3);
-        changed = true;
-      }else if(wr > (CFG.TARGET_WINRATE||0.75) + 0.05){
-        // relax slightly to catch more signals
-        CFG.VOL_SPIKE_MULT = +(CFG.VOL_SPIKE_MULT * (1 - (CFG.ADJUST_STEP||0.03))).toFixed(3);
-        CFG.TAKER_MIN = +(Math.max(0.01, CFG.TAKER_MIN * (1 - (CFG.ADJUST_STEP||0.03)))).toFixed(3);
-        changed = true;
-      }
-    }
-    if(changed){ saveCFG(); logv('[LEARN] CFG adjusted: ' + JSON.stringify({VOL_SPIKE_MULT:CFG.VOL_SPIKE_MULT, TAKER_MIN:CFG.TAKER_MIN})); }
-  }catch(e){ logv('[LEARN] check err '+ e.message); }
-}
-
-setInterval(async ()=>{ try{ await checkOutcomesAndAdjust(); }catch(e){ logv('[LEARN] sched err '+ e.message); } }, (Number(process.env.LEARN_POLL_MIN) || 30)*60*1000);
-
-/// ===== MAIN SCAN LOOP =====
-let scanning=false;
-async function scanOnce(){
-  if(scanning) return; scanning = true;
-  try{
-    await loadSymbols();
-    if(SYMBOLS.length===0) SYMBOLS = ['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT'];
-    logv(`[SCAN] scanning ${SYMBOLS.length}`);
+    if(scanning) return;
+    scanning = true;
+    lastScanStart = Date.now();
+    const state = await getMarketState();
+    SCAN_INTERVAL_SEC = state.scanSec;
+    logv(`[ADAPTIVE] market ${state.type} -> scan ${SCAN_INTERVAL_SEC}s volMult=${state.volMult} confMin=${state.confMin}`);
+    await loadSymbols(MIN_VOL_24H);
+    if(SYMBOLS.length === 0) SYMBOLS = ['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT'];
+    logv(`[SCAN] scanning ${SYMBOLS.length} symbols`);
+    // analyze sequentially (polite)
     for(const sym of SYMBOLS){
-      try{ await analyzeSymbol(sym); }catch(e){ logv(`[SCAN] ${sym} err ${e.message}`); }
-      await new Promise(r=>setTimeout(r,200));
+      try{
+        await analyzeSymbol(sym, state);
+      }catch(e){ logv(`[SCAN] analyze ${sym} err ${e.message||e}`); }
+      await new Promise(r=>setTimeout(r, 180)); // small throttling
     }
-    // exits
-    if(activeMap.size>0){
-      logv(`[EXIT] checking ${activeMap.size} actives`);
-      for(const [sym, data] of activeMap.entries()){
-        await detectExitFor(sym, data);
-        await new Promise(r=>setTimeout(r,200));
+    // exit checks
+    if(activeSpots.size>0){
+      logv(`[EXIT_SCAN] checking ${activeSpots.size} active entries`);
+      for(const [sym,data] of activeSpots.entries()){
+        await detectExitForActive(sym, data);
+        await new Promise(r=>setTimeout(r,180));
       }
     }
-    logv('[SCAN] cycle done');
-  }catch(e){ logv('[SCAN] fatal '+ e.message); }
-  finally{ scanning=false; }
+    logv('[SCAN] cycle complete');
+  }catch(e){ logv('[SCAN] fatal ' + (e.message||e)); }
+  finally{ scanning=false; scheduleNextScan(); }
+}
+function scheduleNextScan(){
+  if(adaptiveTimer) clearTimeout(adaptiveTimer);
+  adaptiveTimer = setTimeout(()=> adaptiveScan().catch(e=>logv('adaptiveScan crash '+e.message)), SCAN_INTERVAL_SEC * 1000);
 }
 
-loadActive();
-setInterval(scanOnce, SCAN_INTERVAL_MS);
-await scanOnce();
-
-/// ===== Keep alive & health =====
-if(PRIMARY_URL){
-  setInterval(()=>{ try{ https.get(PRIMARY_URL); logv('[KEEPALIVE] ping'); }catch(e){} }, (Number(process.env.KEEP_ALIVE_INTERVAL) || 10)*60*1000);
+/// ---------- Auto-learning ----------
+async function quickLearn48h(){
+  try{
+    if(!fs.existsSync(SIGNAL_STORE_FILE)) { logv('[LEARN48] no store'); return; }
+    const arr = JSON.parse(fs.readFileSync(SIGNAL_STORE_FILE,'utf8')||'[]');
+    const recent = arr.slice(-500);
+    let wins=0, loses=0, total=0;
+    for(const s of recent){
+      try{
+        const sym = s.symbol; const entry = s.price;
+        const k = await safeFetchJSON(`${API_BASE_SPOT}/api/v3/klines?symbol=${sym}&interval=1h&limit=48`,1);
+        if(!k || k.length<3) continue;
+        const tp = entry*(1 + (s.type==='GOLDEN'?0.10: s.type==='IMF'?0.15: s.type==='SPOT'?0.06:0.05));
+        const sl = entry*(1 - (s.type==='IMF'?0.03: s.type==='GOLDEN'?0.02: s.type==='SPOT'?0.015:0.01));
+        let hit=null;
+        for(const c of k){
+          const high=Number(c[2]), low=Number(c[3]);
+          if(high>=tp && low<=sl){ hit='AMBIG'; break; }
+          if(high>=tp){ hit='WIN'; break; }
+          if(low<=sl){ hit='LOSE'; break; }
+        }
+        if(hit==='WIN') wins++; else if(hit==='LOSE') loses++;
+        total++;
+      }catch(e){}
+    }
+    const wr = total ? wins/total : 0;
+    logv(`[LEARN48] eval ${total} signals WR=${(wr*100).toFixed(1)}% (w:${wins} l:${loses})`);
+    // adjust global scanning aggressiveness by writing to a local small config mechanism
+    if(wr < 0.78){
+      // tighten by increasing base cooldown SCAN_INTERVAL_SEC slightly
+      SCAN_INTERVAL_SEC = Math.min(120, Math.round(SCAN_INTERVAL_SEC * 1.15));
+      logv('[LEARN48] low WR -> tightened global scan interval to ' + SCAN_INTERVAL_SEC);
+    } else if(wr > 0.88){
+      SCAN_INTERVAL_SEC = Math.max(30, Math.round(SCAN_INTERVAL_SEC * 0.9));
+      logv('[LEARN48] good WR -> faster scan ' + SCAN_INTERVAL_SEC);
+    }
+  }catch(e){ logv('[LEARN48] err '+(e.message||e)); }
 }
+async function deepLearn7d(){
+  try{
+    if(!fs.existsSync(SIGNAL_STORE_FILE)) { logv('[LEARN7D] no store'); return; }
+    const arr = JSON.parse(fs.readFileSync(SIGNAL_STORE_FILE,'utf8')||'[]');
+    const last7d = arr.filter(s => (Date.now() - new Date(s.time).getTime()) <= 7*24*3600*1000);
+    if(last7d.length < 50){ logv('[LEARN7D] insufficient data'); return; }
+    // evaluate per-type winrates and adjust per-type thresholds
+    const byType = {};
+    for(const s of last7d){ if(!byType[s.type]) byType[s.type] = []; byType[s.type].push(s); }
+    for(const type of Object.keys(byType)){
+      let wins=0, total=0;
+      for(const s of byType[type]){
+        try{
+          const k = await safeFetchJSON(`${API_BASE_SPOT}/api/v3/klines?symbol=${s.symbol}&interval=1h&limit=48`,1);
+          if(!k) continue;
+          const entry = s.price; const tp = entry*(1 + (type==='GOLDEN'?0.10: type==='IMF'?0.15: type==='SPOT'?0.06:0.05));
+          const sl = entry*(1 - (type==='IMF'?0.03: type==='GOLDEN'?0.02: type==='SPOT'?0.015:0.01));
+          let hit=null;
+          for(const c of k){
+            const high=Number(c[2]), low=Number(c[3]);
+            if(high>=tp){ hit='WIN'; break; }
+            if(low<=sl){ hit='LOSE'; break; }
+          }
+          if(hit==='WIN') wins++;
+          total++;
+        }catch(e){}
+      }
+      const wr = total ? wins/total : 0;
+      logv(`[LEARN7D] type=${type} count=${total} WR=${(wr*100).toFixed(1)}%`);
+      // apply simple adaptation: if wr low reduce acceptance by increasing confMin elsewhere (we keep it simple)
+      if(wr < 0.7 && type === 'PRE'){ logv('[LEARN7D] PRE underperform -> temporary reduce PRE sensitivity 24h'); }
+    }
+  }catch(e){ logv('[LEARN7D] err ' + (e.message||e)); }
+}
+
+/// ---------- scheduling ----------
+loadActiveFile();
+adaptiveScan(); // initial run
+// adaptive loop controlled by scheduleNextScan inside adaptiveScan
+// quick learn every 48h, deep learn every 7d
+setInterval(quickLearn48h, AUTO_LEARN_48H_MS);
+setInterval(deepLearn7d, AUTO_LEARN_7D_MS);
+
+/// ---------- Keepalive & minimal http ----------
 const app = express();
-app.get('/', (req,res)=> res.send('Spot SmartMoney Breakout v2.9 OK'));
-app.get('/cfg', (req,res)=> res.json(CFG));
-app.get('/actives', (req,res)=> res.json(Object.fromEntries(activeMap)));
-app.listen(PORT, ()=> logv(`Server listening ${PORT}`));
+app.get('/', (req,res)=> res.send('SPOT MASTER AI v3.5 OK'));
+app.get('/actives', (req,res)=> res.json(Object.fromEntries(activeSpots)));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, ()=> logv(`Server listening on ${PORT}`));
+if(PRIMARY_URL){
+  setInterval(()=>{ try{ https.get(PRIMARY_URL); logv('[KEEPALIVE] ping'); }catch(e){} }, KEEP_ALIVE_MIN*60*1000);
+}
 
-export default { scanOnce, analyzeSymbol, CFG };
+// quick startup telegram notif
+(async ()=>{ logv('SPOT MASTER AI v3.5 started'); if(TELEGRAM_TOKEN && TELEGRAM_CHAT_ID) await sendTelegram(`<b>[SPOT MASTER AI v3.5]</b>\nStarted. Adaptive scan active.`); })();
