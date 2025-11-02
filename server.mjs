@@ -873,14 +873,7 @@ async function smartDelaySwitch(sym, reason) {
     }
   }, delaySec * 1000);
 }
-// === Keep Render awake ===
-import https from 'https';
-const KEEP_ALIVE_INTERVAL = process.env.KEEP_ALIVE_INTERVAL || 10;
 
-setInterval(() => {
-  https.get(process.env.PRIMARY_URL || 'https://radar-worker-yte4.onrender.com');
-  console.log(`[KeepAlive] Ping sent to self at ${new Date().toLocaleTimeString()}`);
-}, KEEP_ALIVE_INTERVAL * 60 * 1000);
 // === TEST EXIT ALERT ===
 detectFutureExit({
   symbol: "BTCUSDT",
@@ -890,3 +883,11 @@ detectFutureExit({
   fundingPrev: 0.002,
   side: "LONG"
 });
+// === Keep Render awake ===
+import https from 'https';
+const KEEP_ALIVE_INTERVAL = process.env.KEEP_ALIVE_INTERVAL || 10;
+
+setInterval(() => {
+  https.get(process.env.PRIMARY_URL || 'https://radar-worker-yte4.onrender.com');
+  console.log(`[KeepAlive] Ping sent to self at ${new Date().toLocaleTimeString()}`);
+}, KEEP_ALIVE_INTERVAL * 60 * 1000);
