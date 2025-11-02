@@ -17,7 +17,30 @@ const SYMBOL_REFRESH_H = 6;
 const SYMBOL_MIN_VOL = Number(process.env.SYMBOL_MIN_VOL || 10000000); // 10M default
 const SYMBOL_MIN_CHANGE = Number(process.env.SYMBOL_MIN_CHANGE || 5); // 3% default
 const ACTIVE_FILE = path.resolve("./active_spots.json");
+const ACTIVE_FILE = path.resolve("./active_symbols.json");
 
+// ===== Anti-duplicate alert memory =====
+const ALERT_MEMORY = new Map(); // key: symbol-level -> timestamp
+const ALERT_COOLDOWN_MIN = 15; // phút, đổi tuỳ ý (10 / 15 / 30)
+
+function canSendAlert(symbol, level = "SPOT") {
+  const key = `${level}:${symbol}`;
+  const now = Date.now();
+  const lastTime = ALERT_MEMORY.get(key) || 0;
+  const diffMin = (now - lastTime) / 60000;
+  if (diffMin >= ALERT_COOLDOWN_MIN) {
+    ALERT_MEMORY.set(key, now);
+    return true;
+  }
+  return false;
+}
+
+// logger (dạng cũ, chi tiết)
+function logv(msg) {
+  const s = `[${new Date().toLocaleString("vi-VN")}] ${msg}`;
+  console.log(s);
+  ...
+}
 // logger (dạng cũ, chi tiết)
 function logv(msg) {
   const s = `[${new Date().toLocaleString('vi-VN')}] ${msg}`;
