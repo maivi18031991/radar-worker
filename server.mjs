@@ -15,7 +15,7 @@ const KEEP_ALIVE_INTERVAL = Number(process.env.KEEP_ALIVE_INTERVAL || 10); // mi
 const SCAN_INTERVAL_MS = Number(process.env.SCAN_INTERVAL_SEC || 60) * 1000; // default 60s
 const SYMBOL_REFRESH_H = 6;
 const SYMBOL_MIN_VOL = Number(process.env.SYMBOL_MIN_VOL || 10000000); // 10M default
-const SYMBOL_MIN_CHANGE = Number(process.env.SYMBOL_MIN_CHANGE || 3); // 3% default
+const SYMBOL_MIN_CHANGE = Number(process.env.SYMBOL_MIN_CHANGE || 5); // 3% default
 const ACTIVE_FILE = path.resolve("./active_spots.json");
 
 // logger (dạng cũ, chi tiết)
