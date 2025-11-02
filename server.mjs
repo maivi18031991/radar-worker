@@ -850,9 +850,6 @@ async function sendFutureSmartAlert(sym, opts={modePreference:'both'}) {
 /* ====== END FUTURE SMART MODE v2 ====== */
 
 /* ====== START SERVER ====== */
-app.listen(PORT, ()=>console.log(`Radar Hybrid running on port ${PORT}`));
-// Simple health check route for Render
-app.get('/', (req, res) => {
   res.send('Radar Worker Running ✅');
 });
 // ===== SMART DELAY SWITCH (Future → Spot) =====
