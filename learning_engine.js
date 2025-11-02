@@ -188,4 +188,4 @@ async function applyAdjustments(changes) {
     console.error('[LEARN] applyAdjustments error:', e);
   }
 }
-export default = { loadData, saveData, getStats, applyAdjustments };
+export default { loadData, saveData, getStats, applyAdjustments };
