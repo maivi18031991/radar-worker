@@ -43,7 +43,10 @@ const DATA_DIR = path.resolve("./data");
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 // ===== LOAD DYNAMIC CONFIG =====
-
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 let DYNAMIC_CONFIG = {};
 try {
   const cfgPath = path.join(__dirname, 'data', 'dynamic_config.json');
@@ -886,6 +889,11 @@ detectFutureExit({
   fundingNow: -0.001,
   fundingPrev: 0.002,
   side: "LONG"
+});
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log(`✅ Radar Worker running on port ${PORT}`);
 });
 app.listen(PORT, () => {
   console.log(`✅ Radar Worker running on port ${PORT}`);
