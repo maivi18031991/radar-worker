@@ -7,7 +7,7 @@ const fetch = require('node-fetch');
 const pLimit = require('p-limit');
 const fs = require('fs');
 const path = require('path');
-const __dirname = process.cwd();
+const PROJECT_ROOT = (typeof __dirname !== 'undefined') ? __dirname : process.cwd();
 const app = express();
 app.use(express.json());
 // ===== TELEGRAM TEST SEND =====
