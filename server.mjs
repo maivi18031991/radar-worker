@@ -485,7 +485,22 @@ adaptiveScan(); // initial run
 // quick learn every 48h, deep learn every 7d
 setInterval(quickLearn48h, AUTO_LEARN_48H_MS);
 setInterval(deepLearn7d, AUTO_LEARN_7D_MS);
+// ==== Auto-learning cycle integration ====
+import * as learningEngine from "./learning_engine.js";
 
+setInterval(async () => {
+  try {
+    const checked = await learningEngine.checkOutcomesForPending?.() || 0;
+    if (checked > 0) {
+      const adj = await learningEngine.computeAdjustments?.() || { adjust: false };
+      logv(`[LEARNING] ${checked} signals checked — Adjustments: ${adj.adjust ? 'Yes' : 'No'}`);
+    } else {
+      logv(`[LEARNING] no new signals checked`);
+    }
+  } catch (err) {
+    logv("[LEARNING LOOP ERROR] " + (err?.message || err));
+  }
+}, 6 * 3600 * 1000); // chạy mỗi 6 tiếng
 /// ---------- Keepalive & minimal http ----------
 const app = express();
 app.get('/', (req,res)=> res.send('SPOT MASTER AI v3.5 OK'));
