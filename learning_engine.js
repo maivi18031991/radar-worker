@@ -7,7 +7,26 @@ import fetch from "node-fetch";
 // 🧠 Train Fast Mode (ép học nhanh để test)
 const TRAIN_FAST_MODE = true; // Bật chế độ học nhanh
 const TRAIN_FAST_INTERVAL = 15 * 60 * 1000; // Học lại sau mỗi 15 phút
+// ===== SmartFlow Auto-Debias Config =====
+const AUTO_DEBIAS_MODE = true;          // ✅ bật chế độ tự lọc bias
+const DEBIAS_THRESHOLD_RSI = 55;        // nếu RSI cao hơn 55 thì cảnh báo trap
+const DEBIAS_VOL_RATIO = 2.5;           // vol spike gấp 2.5 lần vol trung bình
+const DEBIAS_CONF_REDUCE = 0.15;        // giảm 15% độ tin cậy nếu nghi trap
 
+function applyAutoDebias(Conf, RSI_H1, VolNow, Vol24h) {
+  if (!AUTO_DEBIAS_MODE) return Conf;
+  try {
+    const volRatio = VolNow / Vol24h;
+    if (RSI_H1 > DEBIAS_THRESHOLD_RSI && volRatio > DEBIAS_VOL_RATIO) {
+      const newConf = Math.max(0, Conf - DEBIAS_CONF_REDUCE);
+      logv(`[AUTO-DEBIAS] ↓Conf ${Conf.toFixed(2)} → ${newConf.toFixed(2)} | RSI=${RSI_H1} | volRatio=${volRatio.toFixed(2)}`);
+      return newConf;
+    }
+  } catch (err) {
+    console.error("[AUTO-DEBIAS] Error:", err);
+  }
+  return Conf;
+}
 // if (TRAIN_FAST_MODE) {
 //   console.log("[FAST-LEARN] Quick learning mode active");
 //   setInterval(() => {
@@ -140,7 +159,11 @@ export async function computeAdjustments() {
   for (const [type, rec] of Object.entries(byType)) {
     if (rec.total < MIN_SIGNALS_TO_TUNE) continue;
     const wr = rec.wins / rec.total;
-
+// === SmartFlow Auto-Debias: giảm Confidence khi vol spike & RSI cao ===
+if (wr < 0.8 && rec.RSI_H1 > 55 && rec.VolNow / rec.Vol24h > 2.5) {
+  rec.Conf = Math.max(0, rec.Conf - 0.15); // giảm độ tin cậy
+  console.log('[SMARTFLOW] Adjusted Conf down due to possible fake breakout');
+}
     if (wr < 0.45) {
       result.adjust = true;
       result.reasons.push(`${type} WR ${Math.round(wr * 100)}% → tighten`);
