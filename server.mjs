@@ -15,6 +15,7 @@ const ALERT_COOLDOWN_MIN = 15;         // per-symbol cooldown
 const SYMBOL_REFRESH_H = 6;
 const API_BASE_SPOT = process.env.API_BASE_SPOT || "https://api.binance.com";
 const SYMBOL_MIN_VOL = Number(process.env.SYMBOL_MIN_VOL || 5000000);
+console.log("[DEBUG] SYMBOL_MIN_VOL from env =", process.env.SYMBOL_MIN_VOL);
 const API_BASE_FUTURE = process.env.API_BASE_FUTURE || ""; // optional
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || process.env.TELEGRAM_BOT_TOKEN || "";
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || process.env.TELEGRAM_CHAT || "";
