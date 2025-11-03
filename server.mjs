@@ -9,6 +9,8 @@ import https from "https";
 import express from "express";
 import * as learningEngine from "./learning_engine.js";
 import { rotationFlowScan } from './rotation_flow_live.js';
+// 🧠 Pre-Breakout AutoCall module
+import { scanRotationFlow } from "./modules/rotation_prebreakout.js";
 /// -------- CONFIG (preset by user's choices) ----------
 let SCAN_INTERVAL_SEC = 60;            // base 60s
 const MIN_VOL_24H = 5_000_000;         // include midcap
