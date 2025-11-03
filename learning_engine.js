@@ -3,6 +3,7 @@
 import fs from "fs";
 import path from "path";
 import fetch from "node-fetch";
+import { quickLearn48h } from "./server.mjs";
 
 // 🧠 Train Fast Mode (ép học nhanh để test)
 const TRAIN_FAST_MODE = true; // Bật chế độ học nhanh
