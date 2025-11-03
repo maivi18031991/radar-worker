@@ -198,4 +198,8 @@ export default {
   checkOutcomesForPending,
   computeAdjustments,
 };
-export { quickLearn48h };
+
+export function quickLearn48h() {
+  console.log("[FAST-LEARN] Quick learning cycle triggered (48h)");
+  // thêm nội dung xử lý học nhanh ở đây nếu có
+}
