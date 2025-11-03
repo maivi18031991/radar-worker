@@ -516,3 +516,8 @@ if(PRIMARY_URL){
 
 // quick startup telegram notif
 (async ()=>{ logv('SPOT MASTER AI v3.5 started'); if(TELEGRAM_TOKEN && TELEGRAM_CHAT_ID) await sendTelegram(`<b>[SPOT MASTER AI v3.5]</b>\nStarted. Adaptive scan active.`); })();
+// ✅ Manual start for quickLearn48h after startup
+setTimeout(() => {
+  quickLearn48h();
+  logv("[FAST-LEARN] QuickLearn48h manually started.");
+}, 5000);
