@@ -3,15 +3,18 @@
 import fs from "fs";
 import path from "path";
 import fetch from "node-fetch";
+
+// 🧠 Train Fast Mode (ép học nhanh để test)
+const TRAIN_FAST_MODE = true; // Bật chế độ học nhanh
+const TRAIN_FAST_INTERVAL = 15 * 60 * 1000; // Học lại sau mỗi 15 phút
+
 if (TRAIN_FAST_MODE) {
-  console.log("[FAST-LEARN] Quick learning mode active (15m interval)");
-  setInterval(async () => {
+  console.log("[FAST-LEARN] Quick learning mode active...");
+  setInterval(() => {
     try {
-      const { quickLearn48h } = await import("./learning_engine.js");
-      await quickLearn48h();
-      console.log("[FAST-LEARN] Cycle complete");
+      quickLearn48h(); // gọi hàm học nhanh
     } catch (err) {
-      console.error("[FAST-LEARN] Error:", err.message);
+      console.error("[FAST-LEARN] Error:", err);
     }
   }, TRAIN_FAST_INTERVAL);
 }
