@@ -1,191 +1,186 @@
-// learning_engine.js
-// CommonJS version – dùng require thay cho import
+// learning_engine.js — SmartFlow AI Learning Engine v3.5
+// Auto-tuning engine: đọc, ghi, học & tinh chỉnh ngưỡng RSI / Vol / Confidence cho từng loại tín hiệu
 import fs from "fs";
 import path from "path";
-import pLimit from "p-limit";
+import fetch from "node-fetch";
 
-const DATA_FILE = path.resolve('./data/learning.json');
-const CHECK_HOURS = Number(process.env.LEARNING_CHECK_HOURS || 24); // sau bao nhiêu giờ check outcome
+const DATA_FILE = path.resolve("./data/learning.json");
+const CONFIG_FILE = path.resolve("./data/dynamic_config.json");
+const CHECK_HOURS = Number(process.env.LEARNING_CHECK_HOURS || 24);
 const MIN_SIGNALS_TO_TUNE = Number(process.env.MIN_SIGNALS_TO_TUNE || 20);
+const AUTO_SAVE_INTERVAL_H = 6; // mỗi 6h lưu tiến trình học
 
-async function loadData(){
-  try{
-    const txt = await fs.readFile(DATA_FILE, 'utf8');
+// === Load / Save ===
+async function loadData() {
+  try {
+    const txt = await fs.promises.readFile(DATA_FILE, "utf8");
     return JSON.parse(txt);
-  }catch(e){
+  } catch {
     return { signals: {}, stats: {} };
   }
 }
-async function saveData(data){
-  await fs.mkdir(path.dirname(DATA_FILE), { recursive: true });
-  await fs.writeFile(DATA_FILE, JSON.stringify(data, null, 2),'utf8');
+async function saveData(data) {
+  await fs.promises.mkdir(path.dirname(DATA_FILE), { recursive: true });
+  await fs.promises.writeFile(DATA_FILE, JSON.stringify(data, null, 2), "utf8");
 }
 
-/**
- * recordSignal - lưu 1 tín hiệu ngay khi gửi alert
- * item: { symbol, type, time, price, rsi, vol, funding, extra }
- */
-export async function recordSignal(item){
+// === Ghi nhận tín hiệu ===
+export async function recordSignal(item) {
   const data = await loadData();
   data.signals[item.symbol] = data.signals[item.symbol] || [];
   data.signals[item.symbol].push({
-    id: Date.now() + '-' + Math.random().toString(36).slice(2,7),
+    id: Date.now() + "-" + Math.random().toString(36).slice(2, 7),
     ...item,
     checked: false,
-    result: null // TP | SL | NO
+    result: null,
   });
   await saveData(data);
 }
 
-/**
- * checkOutcomesForPending - check tất cả signals chưa checked mà đủ thời gian
- * returns number of checked
- * NOTE: uses spot/future API to fetch price history — adapt to your API
- */
-export async function checkOutcomesForPending(){
+// === Check kết quả sau chu kỳ học ===
+export async function checkOutcomesForPending() {
   const data = await loadData();
   const now = Date.now();
   const toCheck = [];
-  for(const sym of Object.keys(data.signals)){
-    for(const s of data.signals[sym]){
-      if(!s.checked && (now - new Date(s.time).getTime()) >= CHECK_HOURS * 3600*1000){
+
+  for (const sym of Object.keys(data.signals)) {
+    for (const s of data.signals[sym]) {
+      if (!s.checked && now - new Date(s.time).getTime() >= CHECK_HOURS * 3600 * 1000)
         toCheck.push(s);
-      }
     }
   }
-  let checkedCount = 0;
-  for(const s of toCheck){
-    try{
+
+  let checked = 0;
+  for (const s of toCheck) {
+    try {
       const res = await checkOutcome(s);
       s.checked = true;
-      s.result = res; // 'TP' | 'SL' | 'NO'
+      s.result = res;
       updateStats(data, s);
-      checkedCount++;
-    }catch(e){
-      console.error('checkOutcome error', e);
+      checked++;
+    } catch (e) {
+      console.error("[LEARN] checkOutcome error", e);
     }
   }
-  if(checkedCount) await saveData(data);
-  return checkedCount;
+
+  if (checked) await saveData(data);
+  return checked;
 }
 
-/**
- * checkOutcome - đơn giản: lấy giá trong window sau signal (ví dụ max/min trong 24h)
- * Trả về 'TP' nếu price đạt TP% above entry, 'SL' nếu giảm đến SL% below entry, else 'NO'
- * Mày có thể thay bằng gọi exchange OHLC.
- */
-async function checkOutcome(signal){
-  // config từ signal hoặc mặc định
+// === Kiểm tra kết quả 1 tín hiệu ===
+async function checkOutcome(signal) {
   const LOOK_HOURS = Number(process.env.LEARNING_LOOK_HOURS || 24);
-  const TP_PCT = Number(signal.tpPct || process.env.DEFAULT_TP_PCT || 0.06); // 6% mặc định
-  const SL_PCT = Number(signal.slPct || process.env.DEFAULT_SL_PCT || 0.02); // 2% mặc định
+  const TP_PCT = Number(signal.tpPct || 0.06);
+  const SL_PCT = Number(signal.slPct || 0.02);
 
-  // giả sử có API_BASE_SPOT để lấy candles: /candles?symbol=XXX&limit=100
-  // chỉnh điều này theo API thực của mày
-  const apiBase = process.env.API_BASE_SPOT || process.env.API_BASE_FUTURE || '';
-  if(!apiBase){
-    // fallback: không check được -> mark NO
-    return 'NO';
-  }
+  const apiBase = process.env.API_BASE_SPOT || process.env.API_BASE_FUTURE || "";
+  if (!apiBase) return "NO";
 
-  const symbol = signal.symbol;
-  // call exchange candle endpoint - this is placeholder path, chỉnh cho đúng
-  const url = `${apiBase}/candles?symbol=${symbol}&interval=1h&limit=${LOOK_HOURS+1}`;
+  const url = `${apiBase}/api/v3/klines?symbol=${signal.symbol}&interval=1h&limit=${LOOK_HOURS + 1}`;
   const r = await fetch(url);
-  if(!r.ok) return 'NO';
-  const candles = await r.json(); // assume array of {open,high,low,close}
-  if(!Array.isArray(candles) || candles.length===0) return 'NO';
+  if (!r.ok) return "NO";
+  const candles = await r.json();
+  if (!Array.isArray(candles) || !candles.length) return "NO";
 
   const entry = Number(signal.price);
-  let reachedTP=false, reachedSL=false;
-  for(const c of candles){
-    const high = Number(c.high);
-    const low = Number(c.low);
-    if(high >= entry * (1 + TP_PCT)) reachedTP = true;
-    if(low <= entry * (1 - SL_PCT)) reachedSL = true;
-    if(reachedTP && reachedSL) break;
+  let tp = false,
+    sl = false;
+
+  for (const c of candles) {
+    const high = Number(c[2]);
+    const low = Number(c[3]);
+    if (high >= entry * (1 + TP_PCT)) tp = true;
+    if (low <= entry * (1 - SL_PCT)) sl = true;
+    if (tp || sl) break;
   }
-  if(reachedTP && !reachedSL) return 'TP';
-  if(reachedSL && !reachedTP) return 'SL';
-  if(reachedTP && reachedSL) {
-    // nếu cả 2 xảy ra, xem first occurence (đơn giản: TP ưu tiên)
-    return 'TP';
-  }
-  return 'NO';
+
+  if (tp && !sl) return "TP";
+  if (sl && !tp) return "SL";
+  return "NO";
 }
 
-/**
- * updateStats - cập nhật thống kê tổng, per-type, per-symbol
- */
-function updateStats(data, s){
-  data.stats = data.stats || { overall: {total:0, wins:0}, byType:{}, bySymbol:{} };
+// === Cập nhật thống kê học ===
+function updateStats(data, s) {
+  data.stats = data.stats || { overall: { total: 0, wins: 0 }, byType: {}, bySymbol: {} };
   const st = data.stats;
+
   st.overall.total++;
-  if(s.result === 'TP') st.overall.wins++;
+  if (s.result === "TP") st.overall.wins++;
 
-  const t = s.type || 'UNKNOWN';
-  st.byType[t] = st.byType[t] || {total:0, wins:0};
+  const t = s.type || "UNKNOWN";
+  st.byType[t] = st.byType[t] || { total: 0, wins: 0 };
   st.byType[t].total++;
-  if(s.result === 'TP') st.byType[t].wins++;
+  if (s.result === "TP") st.byType[t].wins++;
 
-  st.bySymbol[s.symbol] = st.bySymbol[s.symbol] || {total:0, wins:0};
+  st.bySymbol[s.symbol] = st.bySymbol[s.symbol] || { total: 0, wins: 0 };
   st.bySymbol[s.symbol].total++;
-  if(s.result === 'TP') st.bySymbol[s.symbol].wins++;
+  if (s.result === "TP") st.bySymbol[s.symbol].wins++;
 }
 
-/**
- * computeAdjustments - simple heuristic: nếu winrate type < threshold thì tighten filters
- * trả về object { adjust: true, changes: { rsiMin:+2, volMin:+10, ... } }
- */
-export async function computeAdjustments(){
+// === Phân tích & Điều chỉnh thông số ===
+export async function computeAdjustments() {
   const data = await loadData();
-  const stats = data.stats || {};
-  const byType = stats.byType || {};
+  const byType = data.stats?.byType || {};
   const result = { adjust: false, reasons: [], changes: {} };
 
-  for(const [type, rec] of Object.entries(byType)){
-    if(rec.total < MIN_SIGNALS_TO_TUNE) continue;
+  for (const [type, rec] of Object.entries(byType)) {
+    if (rec.total < MIN_SIGNALS_TO_TUNE) continue;
     const wr = rec.wins / rec.total;
-    if(wr < 0.45){
-      // tighten: require higher volume or higher rsi for this type
+
+    if (wr < 0.45) {
       result.adjust = true;
-      result.reasons.push(`${type} winrate ${Math.round(wr*100)}% -> tighten`);
+      result.reasons.push(`${type} WR ${Math.round(wr * 100)}% → tighten`);
       result.changes[type] = { rsiMinDelta: +3, volMinPctDelta: +10 };
-    }else if(wr > 0.75){
+    } else if (wr > 0.75) {
       result.adjust = true;
-      result.reasons.push(`${type} winrate ${Math.round(wr*100)}% -> relax`);
+      result.reasons.push(`${type} WR ${Math.round(wr * 100)}% → relax`);
       result.changes[type] = { rsiMinDelta: -2, volMinPctDelta: -5 };
     }
   }
+
+  if (result.adjust) await applyAdjustments(result.changes);
   return result;
 }
 
-/**
- * export helper to get stats
- */
-async function getStats() {
-  const data = await loadData();
-  return data.stats || {};
-}
-// === APPLY ADJUSTMENTS (tự tối ưu) ===
+// === Ghi thay đổi vào dynamic_config.json ===
 async function applyAdjustments(changes) {
   try {
-    const configPath = './data/dynamic_config.json';
-    let current = {};
+    let cfg = {};
     try {
-      current = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    } catch(e){ current = {}; }
-
-    // Gộp các thay đổi
-    for (const [key, val] of Object.entries(changes)) {
-      current[key] = val;
+      cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
+    } catch {
+      cfg = {};
     }
 
-    fs.writeFileSync(configPath, JSON.stringify(current, null, 2));
-    console.log('[LEARN] dynamic config updated:', current);
-    return current;
-  } catch(e) {
-    console.error('[LEARN] applyAdjustments error:', e);
+    for (const [key, val] of Object.entries(changes)) {
+      cfg[key] = { ...(cfg[key] || {}), ...val };
+    }
+
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2));
+    console.log("[LEARN] dynamic config updated:", cfg);
+    return cfg;
+  } catch (e) {
+    console.error("[LEARN] applyAdjustments error", e);
   }
 }
-export default { loadData, saveData, getStats, applyAdjustments };
+
+// === Tự động chạy chu kỳ học định kỳ ===
+setInterval(async () => {
+  try {
+    const res = await checkOutcomesForPending();
+    if (res > 0) {
+      const adj = await computeAdjustments();
+      console.log("[LEARN] cycle complete:", adj);
+    }
+  } catch (e) {
+    console.error("[LEARN] cycle error", e);
+  }
+}, AUTO_SAVE_INTERVAL_H * 3600 * 1000);
+
+export default {
+  loadData,
+  saveData,
+  recordSignal,
+  checkOutcomesForPending,
+  computeAdjustments,
+};
