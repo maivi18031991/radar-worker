@@ -488,7 +488,6 @@ adaptiveScan(); // initial run
 setInterval(quickLearn48h, AUTO_LEARN_48H_MS);
 setInterval(deepLearn7d, AUTO_LEARN_7D_MS);
 // ==== Auto-learning cycle integration ====
-import * as learningEngine from "./learning_engine.js";
 
 setInterval(async () => {
   try {
