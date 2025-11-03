@@ -3,7 +3,20 @@
 import fs from "fs";
 import path from "path";
 import fetch from "node-fetch";
+// 🧠 Train Fast Mode (ép học nhanh để test)
+const TRAIN_FAST_MODE = true;  // Bật/tắt chế độ học nhanh
+const TRAIN_FAST_INTERVAL = 15 * 60 * 1000; // 15 phút (15 * 60 * 1000 ms)
 
+if (TRAIN_FAST_MODE) {
+  console.log("[FAST-LEARN] Quick learning mode active (15m interval)");
+  setInterval(() => {
+    try {
+      quickLearn48h(); // gọi lại hàm học nhanh
+    } catch (err) {
+      console.error("[FAST-LEARN] Error:", err.message);
+    }
+  }, TRAIN_FAST_INTERVAL);
+}
 const DATA_FILE = path.resolve("./data/learning.json");
 const CONFIG_FILE = path.resolve("./data/dynamic_config.json");
 const CHECK_HOURS = Number(process.env.LEARNING_CHECK_HOURS || 24);
