@@ -164,6 +164,11 @@ if (wr < 0.8 && rec.RSI_H1 > 55 && rec.VolNow / rec.Vol24h > 2.5) {
   rec.Conf = Math.max(0, rec.Conf - 0.15); // giảm độ tin cậy
   console.log('[SMARTFLOW] Adjusted Conf down due to possible fake breakout');
 }
+    // === SmartFlow Auto-Recover: tăng lại Confidence khi winrate ổn định ===
+if (wr > 0.75 && rec.Conf < 0.9) {
+  rec.Conf = Math.min(1, rec.Conf + 0.1);
+  console.log('[SMARTFLOW] Confidence recovered slightly due to stable performance');
+}
     if (wr < 0.45) {
       result.adjust = true;
       result.reasons.push(`${type} WR ${Math.round(wr * 100)}% → tighten`);
