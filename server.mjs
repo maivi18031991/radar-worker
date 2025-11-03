@@ -8,6 +8,7 @@ import path from "path";
 import https from "https";
 import express from "express";
 import * as learningEngine from "./learning_engine.js";
+import { rotationFlowScan } from './rotation_flow_live.js';
 /// -------- CONFIG (preset by user's choices) ----------
 let SCAN_INTERVAL_SEC = 60;            // base 60s
 const MIN_VOL_24H = 5_000_000;         // include midcap
@@ -524,3 +525,12 @@ setTimeout(() => {
     logv("[FAST-LEARN] Error in quickLearn48h: " + err.message);
   }
 }, 5000);
+// 🔄 SmartFlow Rotation Scanner mỗi 6 tiếng
+setInterval(async () => {
+  console.log("[ROTATION] Scanning for live flow candidates...");
+  try {
+    await rotationFlowScan();
+  } catch (err) {
+    console.error("[ROTATION ERROR]", err.message);
+  }
+}, 6 * 3600 * 1000);
