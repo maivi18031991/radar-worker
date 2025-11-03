@@ -515,8 +515,7 @@ if(PRIMARY_URL){
 }
 
 // quick startup telegram notif
-(async ()=>{ logv('SPOT MASTER AI v3.5 started'); if(TELEGRAM_TOKEN && TELEGRAM_CHAT_ID) await sendTelegram(`<b>[SPOT MASTER AI v3.5]</b>\nStarted. Adaptive scan active.`); })();
-// ✅ Manual start for quickLearn48h after startup
+(async ()=>{ logv('SPOT MASTER AI v3.5 started'); if(TELEGRAM_TOKEN && TELEGRAM_CHAT_ID) await sendTelegram(`<b>[SPOT MASTER AI v3.5]</b>\nStarted. Adaptive scan // ✅ Manual start for quickLearn48h after startup
 setTimeout(() => {
   try {
     learningEngine.quickLearn48h();
@@ -525,12 +524,15 @@ setTimeout(() => {
     logv("[FAST-LEARN] Error in quickLearn48h: " + err.message);
   }
 }, 5000);
-// 🔄 SmartFlow Rotation Scanner mỗi 6 tiếng
+
+// 🔄 SmartFlow Rotation Flow Scanner (Pre-Breakout)
+import { scanRotationFlow } from "./modules/rotation_prebreakout.js";
+
 setInterval(async () => {
-  console.log("[ROTATION] Scanning for live flow candidates...");
+  logv("[ROTATION] Scanning rotation flow...");
   try {
-    await rotationFlowScan();
+    await scanRotationFlow();
   } catch (err) {
-    console.error("[ROTATION ERROR]", err.message);
+    logv("[ROTATION ERROR] " + (err?.message || err));
   }
-}, 6 * 3600 * 1000);
+}, 6 * 3600 * 1000); // quét mỗi 6 tiếng
