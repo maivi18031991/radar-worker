@@ -8,16 +8,16 @@ import fetch from "node-fetch";
 const TRAIN_FAST_MODE = true; // Bật chế độ học nhanh
 const TRAIN_FAST_INTERVAL = 15 * 60 * 1000; // Học lại sau mỗi 15 phút
 
-if (TRAIN_FAST_MODE) {
-  console.log("[FAST-LEARN] Quick learning mode active...");
-  setInterval(() => {
-    try {
-      quickLearn48h(); // gọi hàm học nhanh
-    } catch (err) {
-      console.error("[FAST-LEARN] Error:", err);
-    }
-  }, TRAIN_FAST_INTERVAL);
-}
+// if (TRAIN_FAST_MODE) {
+//   console.log("[FAST-LEARN] Quick learning mode active");
+//   setInterval(() => {
+//     try {
+//       quickLearn48h(); // gọi học nhanh
+//     } catch (err) {
+//       console.error("[FAST-LEARN] Error:", err);
+//     }
+//   }, TRAIN_FAST_INTERVAL);
+// }
 const DATA_FILE = path.resolve("./data/learning.json");
 const CONFIG_FILE = path.resolve("./data/dynamic_config.json");
 const CHECK_HOURS = Number(process.env.LEARNING_CHECK_HOURS || 24);
