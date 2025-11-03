@@ -191,105 +191,136 @@ function computeSLTP(entry, type){
 }
 
 /// ---------- analyze one symbol ----------
-async function analyzeSymbol(sym, riskState = { type:'balanced', volMult:1.6, changeMin:3.0, confMin:50 }){
-  try{
-    const kUrl = `${API_BASE_SPOT}/api/v3/klines?symbol=${sym}&interval=1h&limit=60`;
-    const tUrl = `${API_BASE_SPOT}/api/v3/ticker/24hr?symbol=${sym}`;
-    const [kjson, tjson] = await Promise.all([ safeFetchJSON(kUrl,2), safeFetchJSON(tUrl,2) ]);
-    if(!kjson || !tjson) return null;
+// Replace existing analyzeSymbol with this SmartFlow unified version
+async function analyzeSymbol(sym) {
+  try {
+    // ----------------- basic filter -----------------
+    if (!sym || !/USDT$/.test(sym)) return null; // only USDT pairs
 
-    const closes = kjson.map(c => Number(c[4]));
-    const ma20 = sma(closes,20) || closes.at(-1);
-    const price = Number(tjson.lastPrice || closes.at(-1));
-    const change24 = Number(tjson.priceChangePercent || 0);
-    const vol24 = Number(tjson.quoteVolume || 0);
-    const volsH1 = kjson.map(c=>Number(c[5]||0));
-    const volAvgH1 = Math.max(1, sma(volsH1, Math.min(volsH1.length,20)));
-    const volNow = volsH1.at(-1) || 0;
-    const rsiH1 = computeRSI(closes.slice(-30),14) || 50;
+    // fetch klines + ticker (keep retries inside safeFetchJSON)
+    const kUrl = `${API_BASE_SPOT}/api/v3/klines?symbol=${encodeURIComponent(sym)}&interval=1h&limit=60`;
+    const tUrl = `${API_BASE_SPOT}/api/v3/ticker/24hr?symbol=${encodeURIComponent(sym)}`;
 
-    // TF confirm
-    const k5 = await safeFetchJSON(`${API_BASE_SPOT}/api/v3/klines?symbol=${sym}&interval=5m&limit=12`,1) || [];
-    const k15 = await safeFetchJSON(`${API_BASE_SPOT}/api/v3/klines?symbol=${sym}&interval=15m&limit=12`,1) || [];
-    const closes5 = k5.map(r=>Number(r[4])); const closes15 = k15.map(r=>Number(r[4]));
-    const rsi5 = computeRSI(closes5,14) || 50; const rsi15 = computeRSI(closes15,14) || 50;
-    const ma5 = sma(closes5,20) || price; const ma15 = sma(closes15,20) || price;
-    const tfConfirm = (rsi5>50 && closes5.at(-1)>ma5 && rsi15>50 && closes15.at(-1)>ma15);
-
-    // entry zone
-    const entryZone = { entryLow: fmt(ma20*0.995), entryHigh: fmt(ma20*1.02) };
-    const nearEntry = price >= entryZone.entryLow && price <= entryZone.entryHigh;
-    const volRatio = volAvgH1>0 ? (volNow/volAvgH1) : 1;
-
-    // conditions
-    const isGolden = (price > ma20 * 1.03 && change24 >= Math.max(4, riskState.changeMin));
-    const isSpotConfirm = (price > ma20 && volNow > Math.max(1, volAvgH1 * riskState.volMult) && rsiH1 >= 50 && rsiH1 <= 70);
-    const isPre = (nearEntry && volNow > Math.max(1, volAvgH1 * 1.2) && rsiH1 >= 45 && rsiH1 <= 55);
-    const isIMF = (volNow > Math.max(1, volAvgH1 * 3) && price > ma20 * 0.995);
-
-    const sr = detectSRFromH1(kjson);
-    const dec = await checkDecouple(sym, change24, closes);
-    const fut = await futureBias(sym);
-
-    // confidence building
-    let conf = 0;
-    if(isIMF) conf += 30;
-    if(isGolden) conf += 25;
-    if(isSpotConfirm) conf += 18;
-    if(isPre) conf += 10;
-    conf += Math.min(20, Math.round((volRatio-1)*12));
-    if(tfConfirm) conf += 8;
-    if(dec.decouple) conf += 12;
-    if(fut.ok && fut.funding && fut.funding > 0) conf += 8;
-
-    // final threshold
-    const confThreshold = riskState.confMin || 50;
-    // choose priority: IMF > GOLDEN > SPOT > PRE
-    let chosen = null;
-    if(isIMF && conf >= confThreshold) chosen = 'IMF';
-    else if(isGolden && conf >= confThreshold) chosen = 'GOLDEN';
-    else if(isSpotConfirm && conf >= confThreshold) chosen = 'SPOT';
-    else if(isPre && conf >= Math.max(35, confThreshold-10)) chosen = 'PRE';
-    if(!chosen) return null;
-
-    // adjust SL if decoupled (tighter)
-    let { sl, tp, slPct, tpPct } = computeSLTP(price, chosen);
-    if(dec.decouple && dec.btcChange24 < -1.0){ slPct = slPct*0.7; sl = fmt(price*(1-slPct)); }
-
-    // ensure per-symbol cooldown
-    if(!canSendAlert(sym, chosen)){
-      if(!activeSpots.has(sym)){
-        activeSpots.set(sym, { type: chosen, meta:{ price, ma20:fmt(ma20), vol24, change24, rsiH1, conf } });
-        saveActiveFile();
-      }
+    const [kjson, tjson] = await Promise.all([safeFetchJSON(kUrl), safeFetchJSON(tUrl)]);
+    if (!kjson || !tjson || !Array.isArray(kjson) || kjson.length === 0) {
+      logv(`[ANALYZE] ${sym} no data`);
       return null;
     }
 
-    // build message
-    const lines = [];
-    lines.push(`<b>[SPOT] ${chosen} | ${sym}</b>`);
-    if(entryZone.entryLow && entryZone.entryHigh) lines.push(`EntryZone: ${entryZone.entryLow} - ${entryZone.entryHigh}`);
-    else lines.push(`Price: ${fmt(price)}`);
-    lines.push(`MA20: ${fmt(ma20)} | RSI(H1): ${rsiH1?.toFixed(1)}`);
-    lines.push(`Vol24: ${Number(vol24).toFixed(0)} | VolNow: ${Number(volNow).toFixed(0)} (${volRatio.toFixed(2)}x)`);
-    lines.push(`24h%: ${fmt(change24,4)}% | Conf: ${Math.round(conf)}%`);
-    if(sr.resistance) lines.push(`SR: R:${sr.resistance} | S:${sr.support}`);
-    if(dec.decouple) lines.push(`#DECOUPLE BTC:${fmt(dec.btcChange24,2)}% | Corr:${(dec.corr*100).toFixed(0)}%`);
-    if(fut.ok) lines.push(`FUT: funding:${fmt(fut.funding,6)} | change:${fmt(fut.change,2)}%`);
-    lines.push(`SL: ${fmt(sl)} | TP: ${fmt(tp)} | Time: ${new Date().toLocaleString('vi-VN')}`);
-    // trailing note for learning (client will apply trailing manually)
-    lines.push(`Note: Auto-learning ON | SendType: per-symbol`);
+    // ----- build base arrays -----
+    const closes = kjson.map(c => Number(c[4] || 0));
+    const vols = kjson.map(c => Number(c[5] || 0));
+    const ma20 = sma(closes, 20) || closes.at(-1);
+    const price = Number(tjson.lastPrice || closes.at(-1));
+    const change24 = Number(tjson.priceChangePercent || 0);
+    const volAvg = Math.max(1, sma(vols, Math.min(vols.length, 20)) || 1);
+    const volNow = vols.at(-1) || 0;
+    const volRatio = volNow / volAvg;
+    const rsiH1 = computeRSI(closes.slice(-30)) || 50;
 
-    const msg = lines.join('\n');
+    // quick filters: avoid tiny-volume & excluded tickers
+    const MIN_VOL = Number(process.env.SYMBOL_MIN_VOL || SYMBOL_MIN_VOL || 1000000);
+    if (volAvg < MIN_VOL) { logv(`[ANALYZE] ${sym} skip low vol ${volAvg}`); return null; }
+    if (/(UPUSDT|DOWNUSDT|BULLUSDT|BEARUSDT|_USDT|FDUSD|USD1|USDC|TUSD|USDD)/i.test(sym)) {
+      logv(`[ANALYZE] ${sym} filtered token type`);
+      return null;
+    }
 
-    await sendTelegram(msg);
-    logv(`[ALERT] ${chosen} ${sym} price=${price} conf=${Math.round(conf)} volRatio=${volRatio.toFixed(2)}`);
-    const sig = { time: new Date().toISOString(), symbol: sym, type: chosen, price, ma20:fmt(ma20), vol24, change24, conf, meta:{ sr, dec, fut } };
-    storeSignal(sig);
-    activeSpots.set(sym, { type: chosen, meta: sig });
-    saveActiveFile();
-    return { sym, chosen, conf };
-  }catch(e){ logv(`[ANALYZE] ${sym} err ${e.message||e}`); return null; }
+    // ----------------- BTC context -----------------
+    let btcTrend = "NEUTRAL", btcRSI = 50;
+    try {
+      const btcK = await safeFetchJSON(`${API_BASE_SPOT}/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=30`);
+      if (Array.isArray(btcK) && btcK.length) {
+        const btcCloses = btcK.map(c => Number(c[4] || 0));
+        btcRSI = computeRSI(btcCloses.slice(-30)) || 50;
+        const btcMA20 = sma(btcCloses, 20) || btcCloses.at(-1);
+        btcTrend = (btcCloses.at(-1) > btcMA20) ? "UP" : "DOWN";
+      }
+    } catch (e) {
+      // non-fatal, allow neutral
+    }
+
+    // ----------------- compute Conf (%) -----------------
+    let conf = 0;
+    // volume contribution
+    if (volRatio >= 3) conf += 35;
+    else if (volRatio >= 2) conf += 25;
+    else if (volRatio >= 1.5) conf += 15;
+    // RSI contribution
+    if (rsiH1 >= 55 && rsiH1 <= 70) conf += 20;
+    else if (rsiH1 >= 50 && rsiH1 < 55) conf += 10;
+    else if (rsiH1 > 70 && rsiH1 <= 80) conf += 5;
+    // change24 contribution
+    if (change24 >= 5 && change24 <= 30) conf += 20;
+    else if (change24 >= 3 && change24 < 5) conf += 10;
+    else if (change24 > 30) conf += 5;
+    // price vs MA
+    if (price > ma20 * 1.02) conf += 10;
+    else if (price > ma20) conf += 6;
+    else if (price >= ma20 * 0.995) conf += 2;
+    // BTC alignment bonus
+    if (btcTrend === "UP" && btcRSI >= 50) conf += 5;
+    if (btcTrend === "DOWN" && change24 >= 8) conf += 5;
+    if (conf > 98) conf = 98;
+
+    const CONF_THRESHOLD = Number(process.env.CONF_THRESHOLD || 50);
+    if (conf < CONF_THRESHOLD) {
+      // not confident enough
+      return null;
+    }
+
+    // ----------------- class rules (priority IMF > GOLDEN > SPOT > PRE) -----------------
+    const isIMF = (volRatio >= 3 && price > ma20 * 0.995 && rsiH1 >= 55 && change24 >= 5 && change24 <= 40);
+    const isGolden = (price > ma20 * 1.03 && change24 >= 6 && volRatio >= 1.8);
+    const isSpotConfirm = (price > ma20 && volRatio >= 1.5 && rsiH1 >= 50 && rsiH1 <= 70);
+    const isPre = (price >= ma20 * 0.995 && volRatio >= 1.2 && rsiH1 >= 45 && rsiH1 <= 60);
+
+    let chosen = null;
+    if (isIMF) chosen = 'IMF';
+    else if (isGolden) chosen = 'GOLDEN';
+    else if (isSpotConfirm) chosen = 'SPOT';
+    else if (isPre) chosen = 'PRE';
+    if (!chosen) return null;
+
+    // anti-duplicate cooldown
+    if (!canSendAlert(sym, chosen)) { logv(`[ANALYZE] ${sym} suppressed duplicate ${chosen}`); return null; }
+
+    // ----------------- compute SL / TP (direction-aware) -----------------
+    let slPct = 0.02, tpPct = 0.06;
+    if (chosen === 'GOLDEN') { slPct = Number(process.env.GOLDEN_SL_PCT || 0.02); tpPct = Number(process.env.GOLDEN_TP_PCT || 0.10); }
+    else if (chosen === 'SPOT') { slPct = Number(process.env.SPOT_SL_PCT || 0.015); tpPct = Number(process.env.SPOT_TP_PCT || 0.06); }
+    else if (chosen === 'PRE') { slPct = Number(process.env.PRE_SL_PCT || 0.01); tpPct = Number(process.env.PRE_TP_PCT || 0.05); }
+    else { slPct = Number(process.env.IMF_SL_PCT || 0.02); tpPct = Number(process.env.IMF_TP_PCT || 0.06); }
+
+    const entry = price;
+    const sl = fmt(entry * (1 - slPct));
+    const tp = fmt(entry * (1 + tpPct));
+
+    // ----------------- build message -----------------
+    const lines = [
+      `<b>[SPOT] ${chosen} | ${sym}</b>`,
+      `Price: ${fmt(price)} | MA20: ${fmt(ma20)} | RSI(H1): ${rsiH1.toFixed(1)}`,
+      `EntryZone(SR): ${fmt(ma20 * 0.99)} - ${fmt(ma20 * 1.02)}`,
+      `Vol24: ${Number(tjson.quoteVolume || 0).toFixed(0)} | VolNow: ${Number(volNow)} (${volRatio.toFixed(2)}x)`,
+      `24h%: ${change24}% | Conf: ${Math.round(conf)}%`,
+      `SL: ${sl} | TP: ${tp}`,
+      `BTC: ${btcTrend} (RSI ${btcRSI.toFixed(1)})`,
+      `Note: SmartFlow unified | Auto-learning ON`,
+      `Time: ${new Date().toLocaleString('vi-VN')}`
+    ];
+    const message = lines.join('\n');
+
+    // ----------------- send & mark -----------------
+    await sendTelegram(message);
+    logv(`[SMARTFLOW] ${chosen} ${sym} conf=${Math.round(conf)} volRatio=${volRatio.toFixed(2)} rsi=${rsiH1.toFixed(1)} change24=${change24}`);
+    await markSpotEntry(sym, chosen, { price: entry, ma20: fmt(ma20), vol: volNow, change24, rsi: rsiH1, confidence: Math.round(conf) });
+
+    return { sym, chosen, entry, conf: Math.round(conf) };
+
+  } catch (e) {
+    logv(`[ANALYZE_ERR] ${sym} -> ${e && e.message ? e.message : e}`);
+    return null;
+  }
 }
 
 /// ---------- Exit detection ----------
