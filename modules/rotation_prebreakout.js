@@ -1,5 +1,5 @@
 // --- rotation_prebreakout.js ---
-// v3.7: Pre-Breakout Rotation Scanner + Smart Mirror + Confidence Engine
+// v3.8: Live Mirror Switch + Smart Confidence + Auto Recover
 // Author: ViXuan System Build | Node >= 18 recommended
 
 import fs from "fs/promises";
@@ -7,47 +7,46 @@ import path from "path";
 import fetchNode from "node-fetch";
 const fetch = global.fetch || fetchNode;
 
-// ===================== AUTO-PICK BINANCE MIRROR =====================
-async function autoPickBinanceAPI() {
-  const mirrors = [
-    "https://api-gcp.binance.com",
-    "https://api1.binance.com",
-    "https://api3.binance.com",
-    "https://api4.binance.com",
-    "https://api.binance.com",
-    "https://data-api.binance.vision"
-  ];
+// ===================== MIRROR CONFIG =====================
+let ACTIVE_BINANCE_API = process.env.BINANCE_API || "https://api-gcp.binance.com";
+const MIRRORS = [
+  "https://api-gcp.binance.com",
+  "https://api1.binance.com",
+  "https://api3.binance.com",
+  "https://api4.binance.com",
+  "https://api.binance.com",
+  "https://data-api.binance.vision"
+];
 
-  for (const url of mirrors) {
+// ===================== AUTO SWITCH MIRROR =====================
+async function fetchWithMirrorFallback(endpoint, label = "BINANCE 24h") {
+  for (const base of MIRRORS) {
     try {
-      const testUrl = `${url}/api/v3/ticker/24hr?symbol=BTCUSDT`;
-      const res = await fetch(testUrl, {
+      const url = `${base}${endpoint}`;
+      const res = await fetch(url, {
         headers: {
-          "User-Agent": "Mozilla/5.0 (SpotMasterAI/3.7)",
-          "Accept": "application/json",
+          "User-Agent": "Mozilla/5.0 (SpotMasterAI/3.8)",
+          "Accept": "application/json"
         },
-        timeout: 5000,
+        timeout: 8000
       });
-      if (res && res.ok) {
-        console.log(`[PREBREAKOUT] ✅ Selected Binance mirror: ${url}`);
-        return url;
-      } else {
-        let txt = "";
-        try { txt = await res.text(); } catch {}
-        console.warn(`[PREBREAKOUT] ⚠ Mirror ${url} failed (${res?.status}) body: ${txt.slice(0,100)}`);
-      }
-    } catch (e) {
-      console.log(`[PREBREAKOUT] ❌ Mirror ${url} error: ${e.message}`);
-    }
-    await new Promise(r => setTimeout(r, 300));
-  }
-  console.warn("[PREBREAKOUT] ⚠ No mirror passed → fallback to data-api.binance.vision");
-  return "https://data-api.binance.vision";
-}
 
-// --- Auto-select fastest endpoint at startup ---
-const BINANCE_API = process.env.BINANCE_API || await autoPickBinanceAPI();
-console.log("[PREBREAKOUT] Using Binance API:", BINANCE_API);
+      if (res.ok) {
+        if (base !== ACTIVE_BINANCE_API) {
+          console.log(`[PREBREAKOUT] 🔁 Switched to working mirror: ${base}`);
+          ACTIVE_BINANCE_API = base;
+        }
+        return await res.json();
+      } else {
+        console.warn(`[PREBREAKOUT] ⚠ ${label} failed ${res.status} on ${base}`);
+      }
+    } catch (err) {
+      console.warn(`[PREBREAKOUT] ❌ ${label} mirror ${base} error: ${err.message}`);
+    }
+    await new Promise(r => setTimeout(r, 250));
+  }
+  throw new Error(`[PREBREAKOUT] ❌ All Binance mirrors failed`);
+}
 
 // ===================== CONFIG =====================
 const MIN_VOL24H = 5_000_000;
@@ -58,34 +57,7 @@ const DATA_DIR = path.join(process.cwd(), "data");
 const HYPER_FILE = path.join(DATA_DIR, "hyper_spikes.json");
 const KLINES_LIMIT = 200;
 
-// ===================== SAFE FETCH =====================
-async function safeFetch(url, label = "BINANCE", retries = 3) {
-  for (let i = 0; i < retries; i++) {
-    try {
-      const resp = await fetch(url, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (SpotMasterAI/3.7)",
-          "Accept": "application/json",
-        },
-        timeout: 10000,
-      });
-      if (!resp.ok) {
-        let body = "";
-        try { body = await resp.text(); } catch {}
-        console.warn(`[${label}] ❌ Fetch failed (${resp.status}) attempt=${i + 1}/${retries}, url=${url}, body=${body.slice(0,120)}`);
-        await new Promise(r => setTimeout(r, 500 * (i + 1)));
-        continue;
-      }
-      return await resp.json();
-    } catch (err) {
-      console.warn(`[${label}] ⚠ Attempt ${i + 1}/${retries} → ${err.message}`);
-      await new Promise(r => setTimeout(r, 500 * (i + 1)));
-    }
-  }
-  throw new Error(`${label} fetch failed after ${retries} attempts`);
-}
-
-// ===================== INDICATORS =====================
+// ===================== UTILS =====================
 function sma(arr, n) {
   if (!arr.length) return NaN;
   const slice = arr.slice(-n);
@@ -136,15 +108,15 @@ async function writeHyperSpikes(arr) {
 
 // ===================== BINANCE WRAPPERS =====================
 async function get24hTicker() {
-  return await safeFetch(`${BINANCE_API}/api/v3/ticker/24hr`, "BINANCE 24h");
+  return await fetchWithMirrorFallback("/api/v3/ticker/24hr", "BINANCE 24h");
 }
 async function getKlines(symbol, interval = "1h", limit = KLINES_LIMIT) {
-  return await safeFetch(`${BINANCE_API}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`, "BINANCE KLINES");
+  return await fetchWithMirrorFallback(`/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`, `BINANCE KLINES ${symbol}`);
 }
 function klinesCloseArray(klines) { return klines.map(k => Number(k[4])); }
 function klinesVolumeArray(klines) { return klines.map(k => Number(k[5])); }
 
-// ===================== CONFIDENCE + COMPRESSION =====================
+// ===================== CONFIDENCE LOGIC =====================
 function computeConf({ RSI_H4, RSI_H1, VolNowRatio, BBWidth_H4, BTC_RSI }) {
   let Conf = 0;
   if (RSI_H4 > 45 && RSI_H4 < 60) Conf += 0.25;
@@ -163,7 +135,7 @@ function isCompressed({ price, mb, up, dn, bbWidth, MA20 }) {
   return (nearMA20 || nearMiddle) && notNearUpper;
 }
 
-// ===================== MAIN LOGIC =====================
+// ===================== MAIN FLOW =====================
 export async function scanRotationFlow() {
   try {
     const all24 = await get24hTicker();
@@ -216,8 +188,10 @@ export async function scanRotationFlow() {
         const compressed = isCompressed({ price, mb: bb.mb, up: bb.up, dn: bb.dn, bbWidth: BBWidth_H4, MA20 });
 
         const res = { symbol: t.symbol, price, RSI_H4, RSI_H1, BBWidth_H4, VolNowRatio, Conf, compressed };
-        if (Conf >= CONF_THRESHOLD_SEND && compressed) console.log(`[PREBREAKOUT] ${t.symbol} Conf=${Conf}`);
-        if (Conf >= HYPER_SPIKE_THRESHOLD && compressed) hyper.push({ ...res, ts: Date.now() });
+        if (Conf >= CONF_THRESHOLD_SEND && compressed)
+          console.log(`[PREBREAKOUT] ${t.symbol} Conf=${Conf}`);
+        if (Conf >= HYPER_SPIKE_THRESHOLD && compressed)
+          hyper.push({ ...res, ts: Date.now() });
         results.push(res);
       } catch (e) {
         console.log("[ROTATION] err for", t.symbol, e.message);
@@ -234,7 +208,7 @@ export async function scanRotationFlow() {
   }
 }
 
-// ===================== WRAPPER EXPORT =====================
+// ===================== WRAPPER =====================
 export async function scanPreBreakout() {
   try {
     const data = await scanRotationFlow();
