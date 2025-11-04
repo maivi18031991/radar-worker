@@ -1,6 +1,6 @@
-// --- SPOT MASTER AI v3.6 (Full Integration Build) ---
-// Components: PreBreakout + Smart Learning + Adaptive Flow + Daily Pump + Telegram Sync
-// Author: ViXuan System Build
+// --- SPOT MASTER AI v3.7 (Final Stable Build) ---
+// Modules: PreBreakout + Smart Learning + Adaptive Flow + Daily Pump + Telegram Sync + Auto Learning Monitor
+// Author: ViXuan System Build | Optimized 2025
 
 import fetch from "node-fetch";
 import fs from "fs";
@@ -8,16 +8,15 @@ import path from "path";
 import * as LEARN from "./learning_engine.js";
 import { scanPreBreakout } from "./modules/rotation_prebreakout.js";
 import { scanDailyPumpSync } from "./modules/daily_pump_sync.js";
-import { rotationFlowScan } from "./modules/rotation_flow_live.js"; // ✅ thêm live scan
 
-// ✅ GCP endpoint tránh lỗi 451
+// --- CONFIG ---
 process.env.BINANCE_API = process.env.BINANCE_API || "https://api-gcp.binance.com";
-
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || "";
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "";
 const PRIMARY_URL = process.env.PRIMARY_URL || "";
 const KEEP_ALIVE_INTERVAL = Number(process.env.KEEP_ALIVE_INTERVAL || 10); // minutes
 const SCAN_INTERVAL_MS = Number(process.env.SCAN_INTERVAL_SEC || 60) * 1000; // default 1m
+const LEARNING_MONITOR_INTERVAL = 60 * 60 * 1000; // 1h monitor learning progress
 
 // --- Logger ---
 function logv(msg) {
@@ -25,11 +24,11 @@ function logv(msg) {
   console.log(s);
   try {
     fs.appendFileSync(path.resolve("./server_log.txt"), s + "\n");
-  } catch (e) {}
+  } catch {}
 }
 
 // --- Telegram Sender ---
-async function sendTelegram(text) {
+export async function sendTelegram(text) {
   if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
     logv("[TELEGRAM] missing TOKEN/CHAT_ID");
     return;
@@ -53,24 +52,6 @@ async function sendTelegram(text) {
   }
 }
 
-// --- Safe Fetch JSON ---
-async function safeFetchJSON(url, retries = 2) {
-  for (let i = 0; i < retries; i++) {
-    try {
-      const r = await fetch(url);
-      if (!r.ok) {
-        await new Promise((r) => setTimeout(r, 200 * (i + 1)));
-        continue;
-      }
-      const j = await r.json();
-      return j;
-    } catch (e) {
-      await new Promise((r) => setTimeout(r, 200 * (i + 1)));
-    }
-  }
-  return null;
-}
-
 // --- Unified Push Signal ---
 async function pushSignal(tag, data, conf = 70) {
   try {
@@ -89,25 +70,23 @@ Note: ${note}
 Time: ${new Date().toLocaleString("en-GB", { timeZone: "Asia/Ho_Chi_Minh" })}
 `;
 
-    if (TELEGRAM_TOKEN && TELEGRAM_CHAT_ID) {
-      await sendTelegram(msg);
-    }
-    logv("[PUSH] " + sym + " " + chg.toFixed(2) + "% sent");
+    if (TELEGRAM_TOKEN && TELEGRAM_CHAT_ID) await sendTelegram(msg);
+    logv(`[PUSH] ${sym} Conf=${conf}% Δ=${chg.toFixed(2)}%`);
   } catch (err) {
     console.error("[pushSignal ERROR]", err.message);
   }
 }
 
-// --- MAIN SCAN LOOP (PreBreakout + Adaptive Flow) ---
+// --- MAIN SCAN LOOP (PreBreakout + Learning) ---
 async function mainLoop() {
   logv("[MAIN] cycle started");
   try {
     const preList = await scanPreBreakout();
-    if (preList && preList.length > 0) {
+    if (preList?.length) {
       for (const coin of preList) {
         const conf = LEARN?.evaluateConfidence
           ? LEARN.evaluateConfidence(coin)
-          : 75;
+          : coin.Conf || 75;
         const tag =
           coin.type === "IMF"
             ? "[FLOW]"
@@ -116,13 +95,10 @@ async function mainLoop() {
             : "[PRE]";
         await pushSignal(tag, coin, conf);
       }
-      logv(`[MAIN] ${preList.length} coins processed`);
+      logv(`[MAIN] ✅ ${preList.length} coins processed`);
     } else {
       logv("[MAIN] no breakout candidates found");
     }
-
-    // ✅ Thêm quét rotation real-time mỗi vòng
-    await rotationFlowScan();
   } catch (err) {
     logv("[MAIN ERROR] " + err.message);
   }
@@ -142,28 +118,43 @@ async function runDailyPumpSyncLoop() {
   }
 }
 
+// --- LEARNING MONITOR LOOP ---
+async function runLearningMonitor() {
+  try {
+    const data = await LEARN.loadData();
+    const total = Object.values(data.signals || {}).reduce((a, b) => a + b.length, 0);
+    const stats = data.stats?.overall || { total: 0, wins: 0 };
+    const wr = stats.total ? ((stats.wins / stats.total) * 100).toFixed(1) : "0.0";
+    const msg = `[LEARN_MONITOR] signals=${total}, winrate=${wr}%`;
+    logv(msg);
+
+    // gửi Telegram 2 tiếng/lần (để giám sát server)
+    const hour = new Date().getHours();
+    if (hour % 2 === 0) {
+      await sendTelegram(`🧠 <b>Smart Learning Monitor</b>\nSignals: ${total}\nWR: ${wr}%\n⏰ ${new Date().toLocaleString("vi-VN")}`);
+    }
+  } catch (err) {
+    logv("[LEARN_MONITOR ERROR] " + err.message);
+  }
+}
+
 // --- STARTUP ---
 (async () => {
-  logv("[SPOT MASTER AI v3.6] Starting server (Full Integration)");
+  logv("[SPOT MASTER AI v3.7] Server starting...");
   if (TELEGRAM_TOKEN && TELEGRAM_CHAT_ID)
-    await sendTelegram("<b>[SPOT MASTER AI v3.6]</b>\nServer Started ✅");
+    await sendTelegram("<b>[SPOT MASTER AI v3.7]</b>\nServer Started ✅");
+
+  // Chạy ngay khi khởi động
+  await mainLoop().catch((e) => logv("[MAIN] immediate err " + e.message));
+  await runDailyPumpSyncLoop().catch((e) => logv("[DAILY] immediate err " + e.message));
+  await runLearningMonitor().catch((e) => logv("[LEARN] monitor err " + e.message));
 })();
 
-// --- RUN IMMEDIATE ---
-mainLoop().catch((e) => logv("[MAIN] immediate err " + e.message));
-runDailyPumpSyncLoop(); // run once at startup
+// --- AUTO INTERVALS ---
 setInterval(mainLoop, SCAN_INTERVAL_MS);
-setInterval(runDailyPumpSyncLoop, 4 * 3600 * 1000);
-// --- IMMEDIATE FULL CYCLE ---
-import * as LEARN from "./learning_engine.js";
+setInterval(runDailyPumpSyncLoop, 4 * 3600 * 1000); // 4h/lần
+setInterval(runLearningMonitor, LEARNING_MONITOR_INTERVAL); // 1h/lần
 
-(async () => {
-  console.log("[INIT] 🔥 Running full scan + learning cycle immediately...");
-  await mainLoop();                     // chạy PreBreakout + Flow ngay
-  await runDailyPumpSyncLoop();         // quét top pump ngay
-  await LEARN.quickLearn48h();          // học nhanh ngay
-  console.log("[INIT] ✅ Initial full cycle complete");
-})();
 // --- KEEP-ALIVE ---
 if (PRIMARY_URL) {
   setInterval(() => {
