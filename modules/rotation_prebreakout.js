@@ -267,4 +267,6 @@ export async function scanRotationFlow() {
 }
 
 // default export for convenience
-export default { scanRotationFlow };
+export async function scanPreBreakout() {
+  return await scanRotationFlow();
+}
