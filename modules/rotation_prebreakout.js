@@ -266,7 +266,21 @@ export async function scanRotationFlow() {
   }
 }
 
-// default export for convenience
+// ✅ Export chuẩn cho server_final_plus_prebreakout_v4.mjs
+// Giúp server nhận tín hiệu từ PreBreakout full
 export async function scanPreBreakout() {
-  return await scanRotationFlow();
+  try {
+    const data = await scanRotationFlow();   // Gọi core PreBreakout cũ
+    if (!Array.isArray(data)) {
+      console.warn("[PREBREAKOUT] scanRotationFlow() trả về không phải array");
+      return [];
+    }
+    // lọc tín hiệu hợp lệ: có symbol + conf > 60%
+    const valid = data.filter(x => x.symbol && x.conf >= 60);
+    console.log(`[PREBREAKOUT] xuất ${valid.length} tín hiệu hợp lệ`);
+    return valid;
+  } catch (e) {
+    console.error("[PREBREAKOUT] lỗi: " + e.message);
+    return [];
+  }
 }
