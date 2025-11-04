@@ -6,7 +6,8 @@ import fetch from "node-fetch";
 
 // === Main scan function ===
 export async function scanDailyPumpSync() {
-  const url = "https://api-gcp.binance.com/api/v3/ticker/24hr";
+  const BINANCE_API = process.env.BINANCE_API || "https://api1.binance.com";
+const resp = await fetch(`${BINANCE_API}/api/v3/ticker/24hr`);
   console.log("[DAILY_PUMP] Fetching:", url);
 
   const res = await fetch(url);
