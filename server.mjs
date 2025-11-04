@@ -51,10 +51,12 @@ async function safeFetchURL(pathAndQuery, opts={}, retries=3, label="BINANCE") {
     try {
       const r = await fetch(url, opts);
       if(!r.ok) {
-        logv(`[${label}] ${r.status} ${url}`);
-        if([403,429,500,502,503].includes(r.status)) {
-          rotateAPI();
-        }
+  logv(`[${label}] ${r.status} ${url}`);
+  // Auto switch for blocked or throttled endpoints
+  if([403,429,451,500,502,503].includes(r.status)) {
+    logv(`[API] Detected blocked (${r.status}) → rotating endpoint...`);
+    rotateAPI();
+  }
         await sleep(300 * (i+1));
         continue;
       }
