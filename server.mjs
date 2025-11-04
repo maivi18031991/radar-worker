@@ -8,7 +8,7 @@ import path from "path";
 import * as LEARN from "./learning_engine.js";
 import { scanPreBreakout } from "./modules/rotation_prebreakout.js";
 import { scanDailyPumpSync } from "./modules/daily_pump_sync.js";
-
+process.env.BINANCE_API = process.env.BINANCE_API || "https://api1.binance.com";
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || "";
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "";
 const PRIMARY_URL = process.env.PRIMARY_URL || "";
