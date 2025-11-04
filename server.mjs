@@ -6,8 +6,8 @@ import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
 import * as LEARN from "./learning_engine.js";
-import { scanPreBreakout } from "./rotation_prebreakout.js";
-import { scanDailyPumpSync } from "./daily_pump_sync.js";
+import { scanPreBreakout } from "./modules/rotation_prebreakout.js";
+import { scanDailyPumpSync } from "./modules/daily_pump_sync.js";
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || "";
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "";
