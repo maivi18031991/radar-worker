@@ -154,7 +154,16 @@ mainLoop().catch((e) => logv("[MAIN] immediate err " + e.message));
 runDailyPumpSyncLoop(); // run once at startup
 setInterval(mainLoop, SCAN_INTERVAL_MS);
 setInterval(runDailyPumpSyncLoop, 4 * 3600 * 1000);
+// --- IMMEDIATE FULL CYCLE ---
+import * as LEARN from "./learning_engine.js";
 
+(async () => {
+  console.log("[INIT] 🔥 Running full scan + learning cycle immediately...");
+  await mainLoop();                     // chạy PreBreakout + Flow ngay
+  await runDailyPumpSyncLoop();         // quét top pump ngay
+  await LEARN.quickLearn48h();          // học nhanh ngay
+  console.log("[INIT] ✅ Initial full cycle complete");
+})();
 // --- KEEP-ALIVE ---
 if (PRIMARY_URL) {
   setInterval(() => {
