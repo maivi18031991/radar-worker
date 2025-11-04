@@ -8,7 +8,11 @@ import path from "path";
 import * as LEARN from "./learning_engine.js";
 import { scanPreBreakout } from "./modules/rotation_prebreakout.js";
 import { scanDailyPumpSync } from "./modules/daily_pump_sync.js";
-process.env.BINANCE_API = process.env.BINANCE_API || "https://api1.binance.com";
+import { rotationFlowScan } from "./modules/rotation_flow_live.js"; // ✅ thêm live scan
+
+// ✅ GCP endpoint tránh lỗi 451
+process.env.BINANCE_API = process.env.BINANCE_API || "https://api-gcp.binance.com";
+
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || "";
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "";
 const PRIMARY_URL = process.env.PRIMARY_URL || "";
@@ -94,7 +98,7 @@ Time: ${new Date().toLocaleString("en-GB", { timeZone: "Asia/Ho_Chi_Minh" })}
   }
 }
 
-// --- MAIN SCAN LOOP (PreBreakout + Spot) ---
+// --- MAIN SCAN LOOP (PreBreakout + Adaptive Flow) ---
 async function mainLoop() {
   logv("[MAIN] cycle started");
   try {
@@ -116,6 +120,9 @@ async function mainLoop() {
     } else {
       logv("[MAIN] no breakout candidates found");
     }
+
+    // ✅ Thêm quét rotation real-time mỗi vòng
+    await rotationFlowScan();
   } catch (err) {
     logv("[MAIN ERROR] " + err.message);
   }
