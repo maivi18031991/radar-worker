@@ -14,14 +14,17 @@ import { sendTelegram } from "../telegram.js"; // optional
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const CACHE_FILE = path.join(DATA_DIR, "cache_klines.json");
+// === Full mirror list (v3.8 anti-451) ===
 const MIRRORS_DEFAULT = [
-  "https://api-gcp.binance.com",
+  "https://api.binance.me",             // global mirror (preferred)
+  "https://api1.binance.me",
+  "https://api3.binance.me",
+  "https://api4.binance.me",
   "https://api1.binance.com",
-  "https://api2.binance.com",
   "https://api3.binance.com",
   "https://api4.binance.com",
-  "https://api.binance.me",
-  "https://api.binance.com"
+  "https://api.binance.us",             // ✅ bypass 451 (US mirror)
+  "https://data-api.binance.vision"     // ✅ open data proxy
 ];
 let apiIndex = 0;
 function currentAPI() { return BINANCE_APIS[apiIndex % BINANCE_APIS.length]; }
