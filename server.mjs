@@ -1,6 +1,6 @@
-// --- SPOT MASTER AI v3.6 (Full Integration Build - Auto API Mirror) ---
+// --- SPOT MASTER AI v3.8 (Live Mirror Integration Build) ---
 // Components: PreBreakout + Smart Learning + Adaptive Flow + Daily Pump + Telegram Sync
-// Author: ViXuan System Build
+// Author: ViXuan System Build | Node >= 18 recommended
 
 import fetch from "node-fetch";
 import fs from "fs";
@@ -9,52 +9,30 @@ import * as LEARN from "./learning_engine.js";
 import { scanPreBreakout } from "./modules/rotation_prebreakout.js";
 import { scanDailyPumpSync } from "./modules/daily_pump_sync.js";
 
-// ===================== AUTO-DETECT BINANCE API =====================
-async function autoPickBinanceAPI() {
-  const mirrors = [
-    "https://api-gcp.binance.com",
-    "https://api1.binance.com",
-    "https://api3.binance.com",
-    "https://api4.binance.com",
-    "https://data-api.binance.vision" // ✅ CDN fallback luôn hoạt động
-  ];
-
-  for (const url of mirrors) {
-    try {
-      const res = await fetch(`${url}/api/v3/ticker/24hr`, { method: "GET" });
-      if (res.ok) {
-        console.log(`[SERVER] ✅ Selected working Binance mirror: ${url}`);
-        return url;
-      } else {
-        console.log(`[SERVER] ⚠️ Mirror ${url} failed (${res.status})`);
-      }
-    } catch (e) {
-      console.log(`[SERVER] ❌ Mirror ${url} error: ${e.message}`);
-    }
+// --- Mirror State (shared with breakout) ---
+let ACTIVE_BINANCE_API = process.env.BINANCE_API || "https://api-gcp.binance.com";
+export function updateBinanceMirror(newUrl) {
+  if (newUrl && newUrl !== ACTIVE_BINANCE_API) {
+    ACTIVE_BINANCE_API = newUrl;
+    process.env.BINANCE_API = newUrl;
+    logv(`[SERVER] 🔁 Switched active mirror: ${newUrl}`);
   }
-
-  console.log("[SERVER] ⚠️ All mirrors failed → fallback to data-api");
-  return "https://data-api.binance.vision";
 }
 
-// --- Auto select Binance API on startup ---
-const BINANCE_API = await autoPickBinanceAPI();
-process.env.BINANCE_API = BINANCE_API;
-console.log("[SERVER] Using Binance API:", BINANCE_API);
-
-// ===================== TELEGRAM + LOGGER =====================
+// --- Global Config ---
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || "";
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "";
 const PRIMARY_URL = process.env.PRIMARY_URL || "";
 const KEEP_ALIVE_INTERVAL = Number(process.env.KEEP_ALIVE_INTERVAL || 10); // minutes
 const SCAN_INTERVAL_MS = Number(process.env.SCAN_INTERVAL_SEC || 60) * 1000; // default 1m
 
+// --- Logger ---
 function logv(msg) {
   const s = `[${new Date().toLocaleString("vi-VN")}] ${msg}`;
   console.log(s);
   try {
     fs.appendFileSync(path.resolve("./server_log.txt"), s + "\n");
-  } catch {}
+  } catch (e) {}
 }
 
 // --- Telegram Sender ---
@@ -82,10 +60,11 @@ async function sendTelegram(text) {
   }
 }
 
-// ===================== MAIN CORE LOGIC =====================
+// --- Unified Push Signal ---
 async function pushSignal(tag, data, conf = 70) {
   try {
     if (!data || !data.symbol) return;
+
     const sym = data.symbol.replace("USDT", "");
     const vol = (data.quoteVolume || 0).toLocaleString();
     const chg = data.priceChangePercent || data.change24h || 0;
@@ -149,11 +128,11 @@ async function runDailyPumpSyncLoop() {
   }
 }
 
-// ===================== STARTUP =====================
+// --- STARTUP ---
 (async () => {
-  logv("[SPOT MASTER AI v3.6] Starting server (Full Integration)");
+  logv("[SPOT MASTER AI v3.8] Starting server (Live Mirror Integration)");
   if (TELEGRAM_TOKEN && TELEGRAM_CHAT_ID)
-    await sendTelegram("<b>[SPOT MASTER AI v3.6]</b>\nServer Started ✅");
+    await sendTelegram("<b>[SPOT MASTER AI v3.8]</b>\nServer Started ✅");
 })();
 
 // --- RUN IMMEDIATE ---
@@ -168,6 +147,6 @@ if (PRIMARY_URL) {
     try {
       fetch(PRIMARY_URL);
       logv("[KEEPALIVE] ping sent to PRIMARY_URL");
-    } catch {}
+    } catch (e) {}
   }, KEEP_ALIVE_INTERVAL * 60 * 1000);
 }
