@@ -1,6 +1,6 @@
-// --- SPOT MASTER AI v3.7 (Final Stable Build) ---
-// Modules: PreBreakout + Smart Learning + Adaptive Flow + Daily Pump + Telegram Sync + Auto Learning Monitor
-// Author: ViXuan System Build | Optimized 2025
+// --- SPOT MASTER AI v3.6 (Full Integration Build - Auto API Mirror) ---
+// Components: PreBreakout + Smart Learning + Adaptive Flow + Daily Pump + Telegram Sync
+// Author: ViXuan System Build
 
 import fetch from "node-fetch";
 import fs from "fs";
@@ -9,16 +9,46 @@ import * as LEARN from "./learning_engine.js";
 import { scanPreBreakout } from "./modules/rotation_prebreakout.js";
 import { scanDailyPumpSync } from "./modules/daily_pump_sync.js";
 
-// --- CONFIG ---
-process.env.BINANCE_API = process.env.BINANCE_API || "https://api-gcp.binance.com";
+// ===================== AUTO-DETECT BINANCE API =====================
+async function autoPickBinanceAPI() {
+  const mirrors = [
+    "https://api-gcp.binance.com",
+    "https://api1.binance.com",
+    "https://api3.binance.com",
+    "https://api4.binance.com",
+    "https://data-api.binance.vision" // ✅ CDN fallback luôn hoạt động
+  ];
+
+  for (const url of mirrors) {
+    try {
+      const res = await fetch(`${url}/api/v3/ticker/24hr`, { method: "GET" });
+      if (res.ok) {
+        console.log(`[SERVER] ✅ Selected working Binance mirror: ${url}`);
+        return url;
+      } else {
+        console.log(`[SERVER] ⚠️ Mirror ${url} failed (${res.status})`);
+      }
+    } catch (e) {
+      console.log(`[SERVER] ❌ Mirror ${url} error: ${e.message}`);
+    }
+  }
+
+  console.log("[SERVER] ⚠️ All mirrors failed → fallback to data-api");
+  return "https://data-api.binance.vision";
+}
+
+// --- Auto select Binance API on startup ---
+const BINANCE_API = await autoPickBinanceAPI();
+process.env.BINANCE_API = BINANCE_API;
+console.log("[SERVER] Using Binance API:", BINANCE_API);
+
+// ===================== TELEGRAM + LOGGER =====================
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || "";
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "";
 const PRIMARY_URL = process.env.PRIMARY_URL || "";
 const KEEP_ALIVE_INTERVAL = Number(process.env.KEEP_ALIVE_INTERVAL || 10); // minutes
 const SCAN_INTERVAL_MS = Number(process.env.SCAN_INTERVAL_SEC || 60) * 1000; // default 1m
-const LEARNING_MONITOR_INTERVAL = 60 * 60 * 1000; // 1h monitor learning progress
 
-// --- Logger ---
 function logv(msg) {
   const s = `[${new Date().toLocaleString("vi-VN")}] ${msg}`;
   console.log(s);
@@ -28,7 +58,7 @@ function logv(msg) {
 }
 
 // --- Telegram Sender ---
-export async function sendTelegram(text) {
+async function sendTelegram(text) {
   if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
     logv("[TELEGRAM] missing TOKEN/CHAT_ID");
     return;
@@ -52,11 +82,10 @@ export async function sendTelegram(text) {
   }
 }
 
-// --- Unified Push Signal ---
+// ===================== MAIN CORE LOGIC =====================
 async function pushSignal(tag, data, conf = 70) {
   try {
     if (!data || !data.symbol) return;
-
     const sym = data.symbol.replace("USDT", "");
     const vol = (data.quoteVolume || 0).toLocaleString();
     const chg = data.priceChangePercent || data.change24h || 0;
@@ -70,23 +99,25 @@ Note: ${note}
 Time: ${new Date().toLocaleString("en-GB", { timeZone: "Asia/Ho_Chi_Minh" })}
 `;
 
-    if (TELEGRAM_TOKEN && TELEGRAM_CHAT_ID) await sendTelegram(msg);
-    logv(`[PUSH] ${sym} Conf=${conf}% Δ=${chg.toFixed(2)}%`);
+    if (TELEGRAM_TOKEN && TELEGRAM_CHAT_ID) {
+      await sendTelegram(msg);
+    }
+    logv("[PUSH] " + sym + " " + chg.toFixed(2) + "% sent");
   } catch (err) {
     console.error("[pushSignal ERROR]", err.message);
   }
 }
 
-// --- MAIN SCAN LOOP (PreBreakout + Learning) ---
+// --- MAIN SCAN LOOP (PreBreakout + Spot) ---
 async function mainLoop() {
   logv("[MAIN] cycle started");
   try {
     const preList = await scanPreBreakout();
-    if (preList?.length) {
+    if (preList && preList.length > 0) {
       for (const coin of preList) {
         const conf = LEARN?.evaluateConfidence
           ? LEARN.evaluateConfidence(coin)
-          : coin.Conf || 75;
+          : 75;
         const tag =
           coin.type === "IMF"
             ? "[FLOW]"
@@ -95,7 +126,7 @@ async function mainLoop() {
             : "[PRE]";
         await pushSignal(tag, coin, conf);
       }
-      logv(`[MAIN] ✅ ${preList.length} coins processed`);
+      logv(`[MAIN] ${preList.length} coins processed`);
     } else {
       logv("[MAIN] no breakout candidates found");
     }
@@ -118,42 +149,18 @@ async function runDailyPumpSyncLoop() {
   }
 }
 
-// --- LEARNING MONITOR LOOP ---
-async function runLearningMonitor() {
-  try {
-    const data = await LEARN.loadData();
-    const total = Object.values(data.signals || {}).reduce((a, b) => a + b.length, 0);
-    const stats = data.stats?.overall || { total: 0, wins: 0 };
-    const wr = stats.total ? ((stats.wins / stats.total) * 100).toFixed(1) : "0.0";
-    const msg = `[LEARN_MONITOR] signals=${total}, winrate=${wr}%`;
-    logv(msg);
-
-    // gửi Telegram 2 tiếng/lần (để giám sát server)
-    const hour = new Date().getHours();
-    if (hour % 2 === 0) {
-      await sendTelegram(`🧠 <b>Smart Learning Monitor</b>\nSignals: ${total}\nWR: ${wr}%\n⏰ ${new Date().toLocaleString("vi-VN")}`);
-    }
-  } catch (err) {
-    logv("[LEARN_MONITOR ERROR] " + err.message);
-  }
-}
-
-// --- STARTUP ---
+// ===================== STARTUP =====================
 (async () => {
-  logv("[SPOT MASTER AI v3.7] Server starting...");
+  logv("[SPOT MASTER AI v3.6] Starting server (Full Integration)");
   if (TELEGRAM_TOKEN && TELEGRAM_CHAT_ID)
-    await sendTelegram("<b>[SPOT MASTER AI v3.7]</b>\nServer Started ✅");
-
-  // Chạy ngay khi khởi động
-  await mainLoop().catch((e) => logv("[MAIN] immediate err " + e.message));
-  await runDailyPumpSyncLoop().catch((e) => logv("[DAILY] immediate err " + e.message));
-  await runLearningMonitor().catch((e) => logv("[LEARN] monitor err " + e.message));
+    await sendTelegram("<b>[SPOT MASTER AI v3.6]</b>\nServer Started ✅");
 })();
 
-// --- AUTO INTERVALS ---
+// --- RUN IMMEDIATE ---
+mainLoop().catch((e) => logv("[MAIN] immediate err " + e.message));
+runDailyPumpSyncLoop(); // run once at startup
 setInterval(mainLoop, SCAN_INTERVAL_MS);
-setInterval(runDailyPumpSyncLoop, 4 * 3600 * 1000); // 4h/lần
-setInterval(runLearningMonitor, LEARNING_MONITOR_INTERVAL); // 1h/lần
+setInterval(runDailyPumpSyncLoop, 4 * 3600 * 1000);
 
 // --- KEEP-ALIVE ---
 if (PRIMARY_URL) {
@@ -161,6 +168,6 @@ if (PRIMARY_URL) {
     try {
       fetch(PRIMARY_URL);
       logv("[KEEPALIVE] ping sent to PRIMARY_URL");
-    } catch (e) {}
+    } catch {}
   }, KEEP_ALIVE_INTERVAL * 60 * 1000);
 }
