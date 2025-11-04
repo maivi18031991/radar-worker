@@ -7,15 +7,43 @@ import path from "path";
 import fetchNode from "node-fetch"; // keep for Node envs
 const fetch = (global.fetch || fetchNode);
 
-// ---------- CONFIG ----------
-const BINANCE_API = process.env.BINANCE_API || "https://api-gcp.binance.com";  // ✅ fix endpoint Render
-const MIN_VOL24H = 5_000_000;       // filter minimum 24h vol
-const MAX_TICKERS = 120;           // max tickers to evaluate (top by vol)
-const CONF_THRESHOLD_SEND = 70;    // >= send alert
-const HYPER_SPIKE_THRESHOLD = 85;  // auto-save >= this
+// ---------- CONFIG: Auto-detect fastest Binance API ----------
+import fetchNode from "node-fetch";
+const fetch = (global.fetch || fetchNode);
+
+async function autoPickBinanceAPI() {
+  const mirrors = [
+    "https://api-gcp.binance.com",
+    "https://api1.binance.com",
+    "https://api3.binance.com",
+    "https://api4.binance.com"
+  ];
+  for (const url of mirrors) {
+    try {
+      const res = await fetch(`${url}/api/v3/time`, { timeout: 4000 });
+      if (res.ok) {
+        console.log(`[PREBREAKOUT] ✅ Selected working Binance API: ${url}`);
+        return url;
+      }
+    } catch (e) {
+      console.log(`[PREBREAKOUT] Mirror failed: ${url} (${e.message})`);
+    }
+  }
+  console.log("[PREBREAKOUT] ⚠️ No mirror passed, fallback to api-gcp");
+  return mirrors[0];
+}
+
+// Tự động chọn API nhanh nhất (chạy 1 lần lúc load)
+const BINANCE_API = await autoPickBinanceAPI();
+
+// ---------- THAM SỐ CẤU HÌNH CHUNG ----------
+const MIN_VOL24H = 5_000_000;       // lọc volume nhỏ
+const MAX_TICKERS = 120;            // top coin theo volume
+const CONF_THRESHOLD_SEND = 70;     // ngưỡng gửi tín hiệu
+const HYPER_SPIKE_THRESHOLD = 85;   // ngưỡng hyper save
 const DATA_DIR = path.join(process.cwd(), "data");
 const HYPER_FILE = path.join(DATA_DIR, "hyper_spikes.json");
-const KLINES_LIMIT = 200; // enough candles for indicators
+const KLINES_LIMIT = 200;           // đủ 200 nến cho chỉ báo
 
 console.log("[PREBREAKOUT] Using Binance API:", BINANCE_API);
 
