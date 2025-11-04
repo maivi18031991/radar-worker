@@ -6,7 +6,7 @@ export async function rotationFlowScan() {
   
   for (const symbol of symbols) {
     try {
-      const r = await fetch(`https://api.binance.com/api/v3/ticker/24hr?symbol=${symbol}`);
+      const r = await fetch(`https://api-gcp.binance.com/api/v3/ticker/24hr?symbol=${symbol}`);
       const d = await r.json();
       const volNow = Number(d.quoteVolume);
       const vol24 = Number(d.volume);
