@@ -15,7 +15,8 @@ const HYPER_SPIKE_THRESHOLD = 85;  // auto-save >= this
 const DATA_DIR = path.join(process.cwd(), "data");
 const HYPER_FILE = path.join(DATA_DIR, "hyper_spikes.json");
 
-const BINANCE_API = "https://api.binance.com";
+const BINANCE_API = "https://api-gcp.binance.com";
+console.log("[PREBREAKOUT] Using Binance API:", BINANCE_API);
 const KLINES_LIMIT = 200; // enough candles for indicators
 
 // ---------- UTIL: basic indicators ----------
