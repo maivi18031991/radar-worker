@@ -1,123 +1,120 @@
 // --- learning_engine.js ---
-// SmartFlow AI Learning Engine v3.8 — Auto Mirror Sync + Auto-Tuning
-// Author: ViXuan System Build | Node >= 18 recommended
+// SmartFlow AI Learning Engine v3.9 ADVANCED
+// + Local Candle Cache System (anti-API-fail + faster learning)
 
 import fs from "fs";
 import path from "path";
-import fetchNode from "node-fetch";
-const fetch = global.fetch || fetchNode;
+import fetch from "node-fetch";
 
-// --- Mirror Sync ---
-let ACTIVE_BINANCE_API = process.env.BINANCE_API || "https://api-gcp.binance.com";
-
-// Cho phép nhận mirror động từ server
-export function updateMirror(newUrl) {
-  if (newUrl && newUrl !== ACTIVE_BINANCE_API) {
-    ACTIVE_BINANCE_API = newUrl;
-    process.env.BINANCE_API = newUrl;
-    console.log(`[LEARNING] 🔁 Mirror updated: ${newUrl}`);
-  }
-}
-
-// ================== CONFIG ==================
+// === File Paths ===
 const DATA_FILE = path.resolve("./data/learning.json");
 const CONFIG_FILE = path.resolve("./data/dynamic_config.json");
+const CACHE_FILE = path.resolve("./data/cache_klines.json");
+
+// === Learning Parameters ===
 const CHECK_HOURS = Number(process.env.LEARNING_CHECK_HOURS || 24);
 const MIN_SIGNALS_TO_TUNE = Number(process.env.MIN_SIGNALS_TO_TUNE || 20);
-const AUTO_SAVE_INTERVAL_H = 6;
+const AUTO_SAVE_INTERVAL_H = 6; // mỗi 6h chạy 1 vòng học
+const BINANCE_API = process.env.BINANCE_API || "https://api-gcp.binance.com";
 
-// ================== LOAD / SAVE ==================
-async function loadData() {
+// === Local Cache ===
+let cache = {};
+function loadCache() {
   try {
-    const txt = await fs.promises.readFile(DATA_FILE, "utf8");
-    return JSON.parse(txt);
-  } catch {
-    return { signals: {}, stats: {} };
-  }
+    cache = JSON.parse(fs.readFileSync(CACHE_FILE, "utf8"));
+  } catch { cache = {}; }
 }
-async function saveData(data) {
-  await fs.promises.mkdir(path.dirname(DATA_FILE), { recursive: true });
-  await fs.promises.writeFile(DATA_FILE, JSON.stringify(data, null, 2), "utf8");
+function saveCache() {
+  fs.mkdirSync(path.dirname(CACHE_FILE), { recursive: true });
+  fs.writeFileSync(CACHE_FILE, JSON.stringify(cache, null, 2));
+}
+function getCachedKlines(symbol, interval = "1h") {
+  const key = `${symbol}_${interval}`;
+  const entry = cache[key];
+  if (!entry) return null;
+  const age = (Date.now() - entry.ts) / 1000;
+  if (age > 600) return null; // hết hạn sau 10p
+  return entry.data;
+}
+async function setCachedKlines(symbol, interval, data) {
+  cache[`${symbol}_${interval}`] = { ts: Date.now(), data };
+  saveCache();
 }
 
-// ================== RECORD SIGNAL ==================
+// === File helpers ===
+async function loadData() {
+  try { return JSON.parse(fs.readFileSync(DATA_FILE, "utf8")); }
+  catch { return { signals: {}, stats: {} }; }
+}
+async function saveData(d) {
+  fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
+  fs.writeFileSync(DATA_FILE, JSON.stringify(d, null, 2), "utf8");
+}
+
+// === Record Signal ===
 export async function recordSignal(item) {
-  const data = await loadData();
-  data.signals[item.symbol] = data.signals[item.symbol] || [];
-  data.signals[item.symbol].push({
+  const d = await loadData();
+  d.signals[item.symbol] = d.signals[item.symbol] || [];
+  d.signals[item.symbol].push({
     id: Date.now() + "-" + Math.random().toString(36).slice(2, 7),
     ...item,
     checked: false,
     result: null,
   });
-  await saveData(data);
+  await saveData(d);
 }
 
-// ================== CHECK OUTCOMES ==================
+// === Fetch Helper (with Cache) ===
+async function fetchKlines(symbol, interval = "1h", limit = 50) {
+  const cached = getCachedKlines(symbol, interval);
+  if (cached) {
+    console.log(`[CACHE] Using ${symbol} ${interval} (${cached.length} candles cached)`);
+    return cached;
+  }
+  const r = await fetch(`${BINANCE_API}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`);
+  const data = await r.json();
+  if (Array.isArray(data)) await setCachedKlines(symbol, interval, data);
+  return data;
+}
+
+// === Check Outcome (TP / SL / Neutral) ===
+async function checkOutcome(signal) {
+  const candles = await fetchKlines(signal.symbol, "1h", 50);
+  if (!Array.isArray(candles) || !candles.length) return "NO";
+
+  const entry = Number(signal.price);
+  const TP = entry * (1 + Number(signal.tpPct || 0.06));
+  const SL = entry * (1 - Number(signal.slPct || 0.02));
+
+  for (const c of candles) {
+    const high = Number(c[2]), low = Number(c[3]);
+    if (high >= TP) return "TP";
+    if (low <= SL) return "SL";
+  }
+  return "NO";
+}
+
+// === Learning Cycle ===
 export async function checkOutcomesForPending() {
-  const data = await loadData();
+  loadCache();
+  const d = await loadData();
   const now = Date.now();
-  const toCheck = [];
-
-  for (const sym of Object.keys(data.signals)) {
-    for (const s of data.signals[sym]) {
-      if (!s.checked && now - new Date(s.time).getTime() >= CHECK_HOURS * 3600 * 1000)
-        toCheck.push(s);
-    }
-  }
-
   let checked = 0;
-  for (const s of toCheck) {
-    try {
-      const res = await checkOutcome(s);
-      s.checked = true;
-      s.result = res;
-      updateStats(data, s);
-      checked++;
-    } catch (e) {
-      console.error("[LEARN] checkOutcome error", e.message);
+  for (const sym of Object.keys(d.signals)) {
+    for (const s of d.signals[sym]) {
+      if (!s.checked && now - new Date(s.id.split("-")[0]).getTime() >= CHECK_HOURS * 3600 * 1000) {
+        s.result = await checkOutcome(s);
+        s.checked = true;
+        updateStats(d, s);
+        checked++;
+      }
     }
   }
-
-  if (checked) await saveData(data);
+  if (checked) await saveData(d);
   return checked;
 }
 
-// ================== CHECK OUTCOME LOGIC ==================
-async function checkOutcome(signal) {
-  const LOOK_HOURS = Number(process.env.LEARNING_LOOK_HOURS || 24);
-  const TP_PCT = Number(signal.tpPct || 0.06);
-  const SL_PCT = Number(signal.slPct || 0.02);
-
-  const url = `${ACTIVE_BINANCE_API}/api/v3/klines?symbol=${signal.symbol}&interval=1h&limit=${LOOK_HOURS + 1}`;
-  try {
-    const r = await fetch(url);
-    if (!r.ok) throw new Error("fetch fail");
-    const candles = await r.json();
-    if (!Array.isArray(candles) || !candles.length) return "NO";
-
-    const entry = Number(signal.price);
-    let tp = false, sl = false;
-
-    for (const c of candles) {
-      const high = Number(c[2]);
-      const low = Number(c[3]);
-      if (high >= entry * (1 + TP_PCT)) tp = true;
-      if (low <= entry * (1 - SL_PCT)) sl = true;
-      if (tp || sl) break;
-    }
-
-    if (tp && !sl) return "TP";
-    if (sl && !tp) return "SL";
-    return "NO";
-  } catch (e) {
-    console.warn(`[LEARN] mirror ${ACTIVE_BINANCE_API} failed:`, e.message);
-    // Nếu mirror fail => trigger auto recover từ PreBreakout
-    return "NO";
-  }
-}
-
-// ================== STATS UPDATE ==================
+// === Stats ===
 function updateStats(data, s) {
   data.stats = data.stats || { overall: { total: 0, wins: 0 }, byType: {}, bySymbol: {} };
   const st = data.stats;
@@ -125,7 +122,7 @@ function updateStats(data, s) {
   st.overall.total++;
   if (s.result === "TP") st.overall.wins++;
 
-  const t = s.type || "UNKNOWN";
+  const t = s.type || "GENERIC";
   st.byType[t] = st.byType[t] || { total: 0, wins: 0 };
   st.byType[t].total++;
   if (s.result === "TP") st.byType[t].wins++;
@@ -135,23 +132,24 @@ function updateStats(data, s) {
   if (s.result === "TP") st.bySymbol[s.symbol].wins++;
 }
 
-// ================== AUTO ADJUST ==================
+// === Compute Adjustments ===
 export async function computeAdjustments() {
-  const data = await loadData();
-  const byType = data.stats?.byType || {};
-  const result = { adjust: false, reasons: [], changes: {} };
+  const d = await loadData();
+  const byType = d.stats?.byType || {};
+  const result = { adjust: false, changes: {} };
 
   for (const [type, rec] of Object.entries(byType)) {
     if (rec.total < MIN_SIGNALS_TO_TUNE) continue;
     const wr = rec.wins / rec.total;
+
     if (wr < 0.45) {
       result.adjust = true;
-      result.reasons.push(`${type} WR ${Math.round(wr * 100)}% → tighten`);
       result.changes[type] = { rsiMinDelta: +3, volMinPctDelta: +10 };
+      console.log(`[LEARN] ${type} WR ${Math.round(wr * 100)}% → tighten`);
     } else if (wr > 0.75) {
       result.adjust = true;
-      result.reasons.push(`${type} WR ${Math.round(wr * 100)}% → relax`);
       result.changes[type] = { rsiMinDelta: -2, volMinPctDelta: -5 };
+      console.log(`[LEARN] ${type} WR ${Math.round(wr * 100)}% → relax`);
     }
   }
 
@@ -160,27 +158,18 @@ export async function computeAdjustments() {
 }
 
 async function applyAdjustments(changes) {
-  try {
-    let cfg = {};
-    try {
-      cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
-    } catch {
-      cfg = {};
-    }
-
-    for (const [key, val] of Object.entries(changes)) {
-      cfg[key] = { ...(cfg[key] || {}), ...val };
-    }
-
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2));
-    console.log("[LEARN] dynamic config updated:", cfg);
-    return cfg;
-  } catch (e) {
-    console.error("[LEARN] applyAdjustments error", e);
+  let cfg = {};
+  try { cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8")); } catch {}
+  for (const [key, val] of Object.entries(changes)) {
+    cfg[key] = { ...(cfg[key] || {}), ...val };
   }
+  fs.mkdirSync(path.dirname(CONFIG_FILE), { recursive: true });
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2));
+  console.log("[LEARN] dynamic config updated:", cfg);
+  return cfg;
 }
 
-// ================== AUTO LOOP ==================
+// === Auto Cycle ===
 setInterval(async () => {
   try {
     const res = await checkOutcomesForPending();
@@ -189,15 +178,12 @@ setInterval(async () => {
       console.log("[LEARN] cycle complete:", adj);
     }
   } catch (e) {
-    console.error("[LEARN] cycle error", e.message);
+    console.error("[LEARN] auto-cycle error:", e.message);
   }
 }, AUTO_SAVE_INTERVAL_H * 3600 * 1000);
 
 export default {
-  loadData,
-  saveData,
   recordSignal,
   checkOutcomesForPending,
   computeAdjustments,
-  updateMirror,
 };
