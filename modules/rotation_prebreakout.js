@@ -72,14 +72,35 @@ async function writeHyperSpikes(arr) {
 // ---------- Binance helpers ----------
 async function get24hTicker() {
   const url = `${BINANCE_API}/api/v3/ticker/24hr`;
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error("Binance 24h tickers failed");
+  const resp = await fetch(url, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 (SpotMasterAI/3.5)",
+      "Accept": "application/json"
+    }
+  }).catch(err => {
+    console.error("[BINANCE FETCH ERROR]", err.message);
+    throw new Error("Binance 24h tickers failed");
+  });
+
+  if (!resp || !resp.ok) {
+    throw new Error("Binance 24h tickers failed");
+  }
+
   return await resp.json(); // array
 }
 async function getKlines(symbol, interval = "1h", limit = KLINES_LIMIT) {
   const url = `${BINANCE_API}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error("Binance klines failed: " + symbol);
+  const resp = await fetch(url, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 (SpotMasterAI/3.5)",
+      "Accept": "application/json"
+    }
+  }).catch(err => {
+    console.error("[BINANCE KLINES ERROR]", err.message);
+    throw new Error("Binance klines fetch failed");
+  });
+
+  if (!resp || !resp.ok) throw new Error("Binance klines failed");
   return await resp.json(); // array of arrays
 }
 
