@@ -619,8 +619,15 @@ if (PRIMARY_URL) {
 }
 
 // expose minimal HTTP healthcheck (optional)
-import express from "express";
-const app = express();
-app.get("/", (req, res) => res.send("Spot Master AI: OK"));
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => logv(`HTTP server listening ${PORT}`));
+// --- Minimal HTTP healthcheck for Render ---
+import http from "http";
+
+const PORT = process.env.PORT || 10000;
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("✅ Radar Worker is running fine.\n");
+});
+
+server.listen(PORT, () => {
+  console.log(`[RENDER FIX] Listening on port ${PORT} (Render check OK)`);
+});
