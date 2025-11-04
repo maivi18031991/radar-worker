@@ -1,13 +1,13 @@
-// --- rotation_prebreakout.js ---
-// v3.8: Live Mirror Switch + Smart Confidence + Auto Recover
-// Author: ViXuan System Build | Node >= 18 recommended
+// --- rotation_prebreakout_v4.1_cache.js ---
+// v4.1: Mirror Switch + Local Cache + Smart Confidence
+// Author: ViXuan System Build (2025-11)
 
 import fs from "fs/promises";
 import path from "path";
 import fetchNode from "node-fetch";
 const fetch = global.fetch || fetchNode;
 
-// ===================== MIRROR CONFIG =====================
+// ===================== CONFIG =====================
 let ACTIVE_BINANCE_API = process.env.BINANCE_API || "https://api-gcp.binance.com";
 const MIRRORS = [
   "https://api-gcp.binance.com",
@@ -18,44 +18,74 @@ const MIRRORS = [
   "https://data-api.binance.vision"
 ];
 
-// ===================== AUTO SWITCH MIRROR =====================
-async function fetchWithMirrorFallback(endpoint, label = "BINANCE 24h") {
-  for (const base of MIRRORS) {
-    try {
-      const url = `${base}${endpoint}`;
-      const res = await fetch(url, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (SpotMasterAI/3.8)",
-          "Accept": "application/json"
-        },
-        timeout: 8000
-      });
-
-      if (res.ok) {
-        if (base !== ACTIVE_BINANCE_API) {
-          console.log(`[PREBREAKOUT] 🔁 Switched to working mirror: ${base}`);
-          ACTIVE_BINANCE_API = base;
-        }
-        return await res.json();
-      } else {
-        console.warn(`[PREBREAKOUT] ⚠ ${label} failed ${res.status} on ${base}`);
-      }
-    } catch (err) {
-      console.warn(`[PREBREAKOUT] ❌ ${label} mirror ${base} error: ${err.message}`);
-    }
-    await new Promise(r => setTimeout(r, 250));
-  }
-  throw new Error(`[PREBREAKOUT] ❌ All Binance mirrors failed`);
-}
-
-// ===================== CONFIG =====================
 const MIN_VOL24H = 5_000_000;
 const MAX_TICKERS = 120;
 const CONF_THRESHOLD_SEND = 70;
 const HYPER_SPIKE_THRESHOLD = 85;
 const DATA_DIR = path.join(process.cwd(), "data");
+const CACHE_FILE = path.join(DATA_DIR, "cache_candles.json");
 const HYPER_FILE = path.join(DATA_DIR, "hyper_spikes.json");
 const KLINES_LIMIT = 200;
+
+// ===================== CACHE SYSTEM =====================
+async function loadCache() {
+  try {
+    const raw = await fs.readFile(CACHE_FILE, "utf8");
+    const cache = JSON.parse(raw || "{}");
+    const now = Date.now();
+    for (const k of Object.keys(cache)) {
+      if (now - (cache[k].ts || 0) > 3 * 3600 * 1000) delete cache[k];
+    }
+    return cache;
+  } catch { return {}; }
+}
+async function saveCache(cache) {
+  try {
+    await fs.mkdir(DATA_DIR, { recursive: true });
+    await fs.writeFile(CACHE_FILE, JSON.stringify(cache, null, 2), "utf8");
+  } catch (e) {
+    console.error("[CACHE WRITE ERROR]", e.message);
+  }
+}
+
+// ===================== MIRROR FETCH WITH CACHE =====================
+let cache = {};
+async function fetchWithMirrorFallback(endpoint, label = "BINANCE 24h") {
+  if (!Object.keys(cache).length) cache = await loadCache();
+  const cacheKey = `binance_${endpoint}`;
+  const now = Date.now();
+
+  // --- check local cache ---
+  if (cache[cacheKey] && now - cache[cacheKey].ts < 5 * 60 * 1000)
+    return cache[cacheKey].data;
+
+  for (const base of MIRRORS) {
+    try {
+      const url = `${base}${endpoint}`;
+      const res = await fetch(url, {
+        headers: { "User-Agent": "Mozilla/5.0 (SpotMasterAI/4.1)", "Accept": "application/json" },
+        timeout: 8000
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        cache[cacheKey] = { ts: Date.now(), data };
+        await saveCache(cache);
+        if (base !== ACTIVE_BINANCE_API) {
+          console.log(`[CACHE] 🔁 Mirror switched to: ${base}`);
+          ACTIVE_BINANCE_API = base;
+        }
+        return data;
+      } else {
+        console.warn(`[CACHE] ⚠ ${label} failed ${res.status} on ${base}`);
+      }
+    } catch (err) {
+      console.warn(`[CACHE] ❌ ${label} mirror ${base} error: ${err.message}`);
+    }
+    await new Promise(r => setTimeout(r, 250));
+  }
+  throw new Error(`[CACHE] ❌ All mirrors failed for ${label}`);
+}
 
 // ===================== UTILS =====================
 function sma(arr, n) {
@@ -91,7 +121,7 @@ function rsiFromArray(closes, period = 14) {
   return 100 - 100 / (1 + rs);
 }
 
-// ===================== FS HELPERS =====================
+// ===================== FILE HELPERS =====================
 async function ensureDataDir() {
   try { await fs.mkdir(DATA_DIR, { recursive: true }); } catch {}
 }
@@ -147,7 +177,7 @@ export async function scanRotationFlow() {
         baseVolume: Number(t.volume || 0),
       }))
       .filter(t => t.vol24 >= MIN_VOL24H)
-      .sort((a,b) => b.vol24 - a.vol24)
+      .sort((a, b) => b.vol24 - a.vol24)
       .slice(0, MAX_TICKERS);
 
     if (!usdt.length) {
@@ -199,7 +229,7 @@ export async function scanRotationFlow() {
     }
 
     if (hyper.length) await writeHyperSpikes(hyper.slice(-500));
-    results.sort((a,b) => b.Conf - a.Conf);
+    results.sort((a, b) => b.Conf - a.Conf);
     console.log(`[ROTATION] scanned ${results.length} symbols, top: ${results[0]?.symbol || "none"} ${results[0]?.Conf || 0}%`);
     return results;
   } catch (err) {
@@ -220,12 +250,4 @@ export async function scanPreBreakout() {
     console.error("[PREBREAKOUT] lỗi:", e.message);
     return [];
   }
-}
-
-// ===================== TEST MODE =====================
-if (import.meta.url === `file://${process.argv[1]}`) {
-  console.log("🧠 Running standalone PreBreakout test...");
-  const res = await scanPreBreakout();
-  console.log(`✅ Done. Found ${res.length} signals.`);
-  process.exit(0);
 }
