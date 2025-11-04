@@ -7,6 +7,7 @@ import fs from "fs";
 import path from "path";
 import * as LEARN from "./learning_engine.js";
 import { scanPreBreakout } from "./modules/rotation_prebreakout.js"; // nếu file đổi tên, sửa phù hợp
+import { scanDailyPumpSync } from "./modules/daily_pump_sync.js";
 // import other helpers if you have them, e.g. smart_layer.js
 
 // -------- CONFIG ----------
@@ -323,7 +324,21 @@ logv("[SPOT MASTER AI v3.5] Starting server v4 (PreBreakout + Adaptive Flow Sync
 mainLoop().catch(e=>logv('[MAIN] immediate err '+e.message));
 // schedule
 setInterval(mainLoop, SCAN_INTERVAL_MS);
+// --- DAILY PUMP SYNC LOOP ---
+async function runDailyPumpSyncLoop() {
+  try {
+    const hits = await scanDailyPumpSync();
+    for (const h of hits) {
+      const tag = h.conf >= 80 ? "[TOP PUMP 🔥]" : "[DAILY PUMP]";
+      await pushSignal(tag, h.payload || h, h.conf);
+    }
+  } catch (e) {
+    console.error("[DAILY PUMP SYNC ERROR]", e.message);
+  }
+}
 
+// chạy mỗi 4h (đề xuất)
+setInterval(runDailyPumpSyncLoop, 4 * 3600 * 1000);
 // keepalive ping to PRIMARY_URL
 import https from "https";
 if(PRIMARY_URL){
