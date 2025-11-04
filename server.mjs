@@ -63,6 +63,7 @@ async function safeFetchURL(pathAndQuery, opts={}, retries=3, label="BINANCE") {
       const contentType = r.headers.get('content-type') || '';
       if(contentType.includes('application/json')) {
         return await r.json();
+        logv(`[${label}] success from ${base}`);
       } else {
         return await r.text();
       }
