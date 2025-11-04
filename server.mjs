@@ -20,12 +20,15 @@ const DATA_DIR = path.resolve(process.env.DATA_DIR || "./data");
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 // Multi-endpoint failover list (try these in order, rotate on 403/429/5xx)
+// --- Auto-rotate API mirror (includes .me global domain to bypass 451) ---
 const BINANCE_APIS = [
-  process.env.BINANCE_API || "https://api-gcp.binance.com",
-  "https://api1.binance.com",
+  process.env.BINANCE_API || "https://api.binance.me",   // ✅ main global mirror (Asia)
+  "https://api1.binance.me",
+  "https://api2.binance.me",
+  "https://api3.binance.me",
+  "https://api-gcp.binance.com",                         // fallback (may be blocked in some regions)
   "https://api3.binance.com",
-  "https://api4.binance.com",
-  "https://data-api.binance.vision"
+  "https://data-api.binance.me"
 ];
 let apiIndex = 0;
 function currentAPI() { return BINANCE_APIS[apiIndex % BINANCE_APIS.length]; }
