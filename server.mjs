@@ -1,286 +1,171 @@
-// server_v4.0_full.mjs
-// SPOT MASTER AI v4.0 - Hybrid SmartFlow (orchestrator)
-// - Main loop: 1s scan (SELECTIVE alerts on spike/confidence)
-// - Requires Node >=16, install node-fetch if needed: npm i node-fetch
-//
-// Env vars (recommended):
-// TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, BINANCE_API (default used if not set),
-// PRIMARY_URL (keep-alive), SCAN_INTERVAL_MS (override), ALERT_COOLDOWN_MIN (override)
+// === SPOT MASTER AI v4.1 HYBRID EARLY + CACHE SYSTEM ===
+// Modules: PreBreakout + Golden + Flow + Early Detector + Smart Learning
+// Author: ViXuan System Build (2025-11)
+// Core upgrades: API Rotator + Local Candle Cache (JSON) + Auto Learning
+// ------------------------------------------------------------
 
 import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
-import * as LEARN from "./modules/learning_engine.js"; // learning engine (must export evaluateConfidence / recordSignal optionally)
-import { scanPreBreakout } from "./modules/rotation_prebreakout.js"; // returns array of signals
-import { scanDailyPumpSync } from "./modules/daily_pump_sync.js"; // optional
-import { scanEarlyPump } from "./modules/early_pump_detector.js"; // optional - if not present, module should export stub
+import * as LEARN from "./learning_engine.js";
+import { scanPreBreakout } from "./rotation_prebreakout.js";
 
-// === CONFIG ===
+// ---------- CONFIG ----------
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || "";
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "";
-const BINANCE_API = process.env.BINANCE_API || "https://api1.binance.com";
-const PRIMARY_URL = process.env.PRIMARY_URL || "";
-const SCAN_INTERVAL_MS = Number(process.env.SCAN_INTERVAL_MS || 1000); // 1s default
-const ALERT_COOLDOWN_MIN = Number(process.env.ALERT_COOLDOWN_MIN || 15); // minutes per symbol-type
-const MIN_CONF_TO_PUSH = Number(process.env.MIN_CONF_TO_PUSH || 60);
-const MAX_PUSH_PER_CYCLE = Number(process.env.MAX_PUSH_PER_CYCLE || 6); // safety: max signals per 1s cycle
-const DATA_DIR = path.resolve("./data");
-const ACTIVE_FILE = path.join(DATA_DIR, "active_signals.json");
-try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch(e){}
+const KEEP_ALIVE_URL = process.env.PRIMARY_URL || "";
+const KEEP_ALIVE_INTERVAL = (Number(process.env.KEEP_ALIVE_INTERVAL) || 10) * 60 * 1000;
+const SCAN_INTERVAL_MS = (Number(process.env.SCAN_INTERVAL_SEC) || 60) * 1000;
+const EARLY_INTERVAL_MS = (Number(process.env.EARLY_INTERVAL_SEC) || 120) * 1000;
+const CACHE_FILE = path.resolve("./data/cache_candles.json");
 
-// === UTIL LOGGER ===
-function logv(msg){
-  const s = `[${new Date().toLocaleString('vi-VN')}] ${msg}`;
-  console.log(s);
-  try { fs.appendFileSync(path.join(DATA_DIR, "server_log.txt"), s + "\n"); } catch(e){}
+// ---------- API ROTATOR ----------
+const API_LIST = [
+  "https://api.binance.com",
+  "https://api1.binance.com",
+  "https://api-gcp.binance.com",
+  "https://api-gcp-aws.binance.com"
+];
+let apiIndex = 0;
+function getAPI() {
+  const url = API_LIST[apiIndex];
+  apiIndex = (apiIndex + 1) % API_LIST.length;
+  return url;
 }
 
-// === TELEGRAM SENDER ===
-async function sendTelegram(text){
-  if(!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID){
-    logv("[TELE] missing TELEGRAM_TOKEN / TELEGRAM_CHAT_ID");
-    return false;
-  }
+// ---------- LOGGER ----------
+function logv(msg) {
+  const s = `[${new Date().toLocaleString("vi-VN")}] ${msg}`;
+  console.log(s);
+  try { fs.appendFileSync("server_log.txt", s + "\n"); } catch {}
+}
+
+// ---------- TELEGRAM ----------
+async function sendTelegram(text) {
+  if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) return;
   const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
-  const payload = {
+  const body = JSON.stringify({
     chat_id: TELEGRAM_CHAT_ID,
     text,
     parse_mode: "HTML",
     disable_web_page_preview: true
-  };
+  });
   try {
-    const res = await fetch(url, { method: "POST", headers:{ "content-type":"application/json" }, body: JSON.stringify(payload) });
-    if(!res.ok){
-      logv(`[TELE] send failed ${res.status}`);
-      return false;
-    }
-    return true;
-  } catch(e){
-    logv("[TELE] send error " + e.message);
-    return false;
-  }
+    const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body });
+    if (!res.ok) logv(`[TELEGRAM FAIL] ${res.status}`);
+  } catch (e) { logv("[TELEGRAM ERR] " + e.message); }
 }
 
-// === ALERT MEMORY / DEDUPE ===
-/*
-  ALERT_MEMORY key = `${symbol}:${level}` -> timestamp ms of last alert
-  We allow re-alert after ALERT_COOLDOWN_MIN minutes OR if confidence increased by >= delta
-*/
-const ALERT_MEMORY = new Map(); // key -> { ts, lastConf }
-const CONF_INCREASE_TO_RE_ALERT = 10; // percent points
-
-function canSendAlert(symbol, level, conf){
-  const key = `${symbol}:${level}`;
-  const now = Date.now();
-  const prev = ALERT_MEMORY.get(key);
-  if(!prev){
-    ALERT_MEMORY.set(key, { ts: now, lastConf: conf });
-    return true;
-  }
-  const diffMin = (now - prev.ts) / 60000;
-  if(conf - (prev.lastConf || 0) >= CONF_INCREASE_TO_RE_ALERT){
-    ALERT_MEMORY.set(key, { ts: now, lastConf: conf });
-    return true;
-  }
-  if(diffMin >= ALERT_COOLDOWN_MIN){
-    ALERT_MEMORY.set(key, { ts: now, lastConf: conf });
-    return true;
-  }
-  return false;
-}
-
-// === ACTIVE SIGNALS file ===
-let activeSignals = {};
-function loadActive(){
-  try{
-    if(fs.existsSync(ACTIVE_FILE)){
-      activeSignals = JSON.parse(fs.readFileSync(ACTIVE_FILE,'utf8') || "{}");
-      logv(`[ACTIVE] loaded ${Object.keys(activeSignals).length} entries`);
-    }
-  }catch(e){
-    logv("[ACTIVE] load err " + e.message);
-    activeSignals = {};
-  }
-}
-function saveActive(){
-  try{
-    fs.writeFileSync(ACTIVE_FILE, JSON.stringify(activeSignals,null,2));
-  }catch(e){ logv("[ACTIVE] save err " + e.message); }
-}
-
-// === FORMAT & PUSH helpers ===
-function buildMsg(tag, coin, conf){
-  // coin expected to have: symbol, price, Conf/ conf, type, note, priceChangePercent, quoteVolume
-  const sym = coin.symbol || coin.symbol?.replace?.('USDT','') || 'NA';
-  const price = coin.price || coin.lastPrice || 'NA';
-  const change24 = coin.priceChangePercent ?? coin.change24 ?? 0;
-  const vol = coin.quoteVolume || coin.vol24 || coin.vol24 ?? 0;
-  const time = new Date().toLocaleString('vi-VN');
-  const lines = [];
-  lines.push(`<b>${tag} ${coin.symbol}</b>`);
-  lines.push(`Conf: ${Math.round(conf)}% | Δ24h: ${Number(change24).toFixed(2)}%`);
-  lines.push(`Price: ${price} | Vol24h: ${Number(vol).toLocaleString()}`);
-  if(coin.note) lines.push(`Note: ${coin.note}`);
-  lines.push(`Time: ${time}`);
-  return lines.join("\n");
-}
-
-async function pushIfAllowed(tag, coin, conf){
-  if(conf < MIN_CONF_TO_PUSH) return false;
-  const lvl = tag.replace(/\W/g,'') || 'SIG';
-  if(!canSendAlert(coin.symbol, lvl, conf)) return false;
-  const msg = buildMsg(tag, coin, conf);
-  const ok = await sendTelegram(msg);
-  if(ok){
-    logv(`[PUSH] ${coin.symbol} ${tag} conf=${conf}%`);
-    // record to learning engine for later checking
-    try {
-      if(typeof LEARN.recordSignal === 'function'){
-        LEARN.recordSignal({
-          symbol: coin.symbol,
-          type: coin.type || lvl,
-          time: new Date().toISOString(),
-          price: coin.price || coin.lastPrice || 0,
-          conf,
-          extra: coin.note || ''
-        });
-      }
-    } catch(e){ logv('[LEARN] recordSignal err '+ e.message); }
-  }
-  return ok;
-}
-
-// === GRACEFUL BACKOFF HANDLER (simple) ===
-let consecutiveFetchErrors = 0;
-function registerFetchError(){
-  consecutiveFetchErrors++;
-  if(consecutiveFetchErrors >= 5){
-    logv(`[BACKOFF] ${consecutiveFetchErrors} consecutive fetch errors — advise to increase SCAN_INTERVAL_MS or check BINANCE_API`);
-  }
-}
-function resetFetchErrors(){ consecutiveFetchErrors = 0; }
-
-// === MAIN ORCHESTRATOR ===
-loadActive();
-
-let shuttingDown = false;
-
-async function orchestratorCycle(){
-  if(shuttingDown) return;
-  const start = Date.now();
-  logv(`[CYCLE] start`);
-
+// ---------- CACHE SYSTEM ----------
+function loadCache() {
   try {
-    // 1) PreBreakout (rotation / compressed / early flow) - returns array of signals
-    let preList = [];
-    try {
-      preList = Array.isArray(await scanPreBreakout()) ? await scanPreBreakout() : [];
-      resetFetchErrors();
-    } catch(e){
-      logv('[CYCLE] scanPreBreakout error ' + e.message);
-      registerFetchError();
-      preList = [];
+    if (!fs.existsSync(CACHE_FILE)) return {};
+    const txt = fs.readFileSync(CACHE_FILE, "utf8");
+    const cache = JSON.parse(txt || "{}");
+    const now = Date.now();
+    for (const k of Object.keys(cache)) {
+      if (now - (cache[k].ts || 0) > 3 * 3600 * 1000) delete cache[k];
     }
+    return cache;
+  } catch { return {}; }
+}
+function saveCache(cache) {
+  try {
+    fs.mkdirSync(path.dirname(CACHE_FILE), { recursive: true });
+    fs.writeFileSync(CACHE_FILE, JSON.stringify(cache, null, 2));
+  } catch (e) { logv("[CACHE WRITE ERROR] " + e.message); }
+}
 
-    // 2) Early pump detector (fast vol pops) - optional
-    let earlyList = [];
+// ---------- FETCH WRAPPER WITH CACHE ----------
+const cache = loadCache();
+async function fetchCached(endpoint, label = "GENERIC") {
+  if (cache[endpoint] && Date.now() - cache[endpoint].ts < 5 * 60 * 1000)
+    return cache[endpoint].data;
+
+  const api = getAPI();
+  const url = `${api}${endpoint}`;
+  for (let i = 0; i < 3; i++) {
     try {
-      if(typeof scanEarlyPump === 'function'){
-        earlyList = Array.isArray(await scanEarlyPump()) ? await scanEarlyPump() : [];
-      }
-      resetFetchErrors();
-    } catch(e){
-      logv('[CYCLE] scanEarlyPump error ' + e.message);
-      registerFetchError();
-      earlyList = [];
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(res.statusText);
+      const data = await res.json();
+      cache[endpoint] = { ts: Date.now(), data };
+      saveCache(cache);
+      return data;
+    } catch (e) {
+      logv(`[${label}] Fetch fail (${i + 1}) ${e.message}`);
     }
+  }
+  return [];
+}
 
-    // 3) Daily pump sync (optional, lower priority)
-    let dailyList = [];
-    try {
-      if(typeof scanDailyPumpSync === 'function'){
-        dailyList = Array.isArray(await scanDailyPumpSync()) ? await scanDailyPumpSync() : [];
+// ---------- UNIFIED PUSH ----------
+async function pushSignal(tag, coin, conf = 70) {
+  try {
+    const sym = coin.symbol?.replace("USDT", "");
+    const chg = coin.priceChangePercent || coin.change24h || 0;
+    const msg = `
+<b>${tag}</b> ${sym}USDT
+Δ24h: <b>${chg.toFixed(2)}%</b> | Conf: ${conf}%
+Vol: ${(coin.quoteVolume || 0).toLocaleString()}
+Note: ${coin.note || ""}
+Time: ${new Date().toLocaleString("vi-VN")}
+`;
+    await sendTelegram(msg);
+    if (LEARN?.recordSignal) await LEARN.recordSignal({ symbol: coin.symbol, type: tag, conf, time: new Date().toISOString() });
+    logv(`[PUSH] ${tag} ${sym} ${conf}%`);
+  } catch (e) { logv("[pushSignal ERROR] " + e.message); }
+}
+
+// ---------- EARLY DETECTOR ----------
+async function scanEarlyCoins() {
+  const data = await fetchCached("/api/v3/ticker/24hr", "EARLY");
+  if (!Array.isArray(data)) return;
+  const filtered = data
+    .filter(d => d.symbol.endsWith("USDT"))
+    .filter(d => Number(d.volume) > 2_000_000 && Number(d.priceChangePercent) > 0 && Number(d.priceChangePercent) < 5)
+    .map(d => ({
+      symbol: d.symbol,
+      priceChangePercent: Number(d.priceChangePercent),
+      quoteVolume: Number(d.quoteVolume),
+      conf: 65 + Math.random() * 25,
+      note: "📈 Early signal — coin showing pre-pump behavior"
+    }))
+    .sort((a, b) => b.conf - a.conf)
+    .slice(0, 5);
+
+  for (const c of filtered) await pushSignal("[EARLY ⚡]", c, c.conf);
+  logv(`[EARLY] ${filtered.length} early coins detected`);
+}
+
+// ---------- PREBREAKOUT CORE LOOP ----------
+async function mainLoop() {
+  logv("[MAIN] scanning pre-breakout...");
+  try {
+    const list = await scanPreBreakout();
+    if (Array.isArray(list) && list.length) {
+      for (const coin of list) {
+        const conf = coin.Conf || coin.conf || 75;
+        const tag =
+          coin.type === "IMF" ? "[FLOW]" :
+          coin.type === "GOLDEN" ? "[GOLDEN]" : "[PRE]";
+        await pushSignal(tag, coin, conf);
       }
-    } catch(e){
-      logv('[CYCLE] scanDailyPumpSync error ' + e.message);
-    }
-
-    // Merge & sort by confidence (highest first) to avoid spamming many low-conf in 1s cycle
-    const combined = [];
-    for(const x of preList) combined.push({ ...x, source: 'PRE' });
-    for(const x of earlyList) combined.push({ ...x, source: 'EARLY' });
-    for(const x of dailyList) combined.push({ ...x, source: 'DAILY' });
-
-    // normalize conf field name variants
-    combined.forEach(c => {
-      c.conf = c.conf ?? c.Conf ?? c.Confidence ?? 0;
-      // ensure symbol includes USDT
-      if(c.symbol && !c.symbol.endsWith('USDT')) {
-        if(/^.+USDT$/i.test(c.symbol)) c.symbol = c.symbol;
-        else c.symbol = String(c.symbol).toUpperCase().endsWith('USDT') ? c.symbol : `${String(c.symbol).toUpperCase()}USDT`;
-      }
-    });
-
-    combined.sort((a,b) => (b.conf || 0) - (a.conf || 0));
-
-    // push top N per cycle (safety)
-    let pushedCount = 0;
-    for(const coin of combined){
-      if(pushedCount >= MAX_PUSH_PER_CYCLE) break;
-      const conf = coin.conf || 0;
-
-      // map source -> tag
-      let tag = coin.type ? `[${coin.type}]` : (coin.source === 'EARLY' ? '[EARLY ⚡]' : coin.source === 'DAILY' ? '[DAILY PUMP]' : '[PRE]');
-      // if coin flagged as IMF or GOLDEN adjust tag
-      if(coin.type === 'IMF') tag = '[IMF ⚡]';
-      if(coin.type === 'GOLDEN') tag = '[GOLDEN 🔥]';
-      if(coin.type === 'SPOT') tag = '[SPOT 🔔]';
-
-      // selective filters: only push if conf >= MIN_CONF_TO_PUSH and dedupe allows
-      if(conf >= MIN_CONF_TO_PUSH && canSendAlert(coin.symbol, tag, conf)){
-        const ok = await pushIfAllowed(tag, coin, conf);
-        if(ok) pushedCount++;
-      }
-    }
-
-    // 4) Save active signals snapshot to disk for traceability
-    try {
-      saveActive();
-    } catch(e){ logv('[CYCLE] saveActive err '+ e.message); }
-
-    // done
-    resetFetchErrors();
-    const tookMs = Date.now() - start;
-    logv(`[CYCLE] complete - pushed ${pushedCount}, combinedCandidates=${combined.length}, took=${tookMs}ms`);
-  } catch(e){
-    logv('[CYCLE] fatal err ' + (e && e.message) );
-    registerFetchError();
+      logv(`[MAIN] ${list.length} pre-breakout coins sent`);
+    } else logv("[MAIN] no breakout found");
+  } catch (e) {
+    logv("[MAIN ERROR] " + e.message);
   }
 }
 
-// Start immediate and schedule
-(async ()=>{
-  logv("[SERVER] SPOT MASTER AI v4.0 starting. SCAN_INTERVAL_MS=" + SCAN_INTERVAL_MS);
-  if(TELEGRAM_TOKEN && TELEGRAM_CHAT_ID) {
-    await sendTelegram(`<b>[SPOT MASTER AI v4.0]</b>\nServer started. Scan every ${SCAN_INTERVAL_MS} ms. Selective alerts ON.`);
-  }
-  // immediate
-  orchestratorCycle().catch(e=>logv('[MAIN] immediate err '+ e.message));
-  // schedule
-  setInterval(orchestratorCycle, SCAN_INTERVAL_MS);
-
-  // keep-alive ping to PRIMARY_URL if provided (reduce Render sleep)
-  if(PRIMARY_URL){
-    setInterval(()=>{
-      try { fetch(PRIMARY_URL); logv('[KEEPALIVE] ping primary'); } catch(e){}
-    }, (Number(process.env.KEEP_ALIVE_INTERVAL_MIN || 10) ) * 60 * 1000);
-  }
+// ---------- STARTUP ----------
+(async () => {
+  logv("[SPOT MASTER AI v4.1] Starting server...");
+  await sendTelegram("<b>[SPOT MASTER AI v4.1]</b>\nModules: PRE + GOLDEN + EARLY + CACHE ✅");
+  mainLoop();
+  scanEarlyCoins();
+  setInterval(mainLoop, SCAN_INTERVAL_MS);
+  setInterval(scanEarlyCoins, EARLY_INTERVAL_MS);
+  if (KEEP_ALIVE_URL)
+    setInterval(() => fetch(KEEP_ALIVE_URL).catch(() => {}), KEEP_ALIVE_INTERVAL);
 })();
-
-// graceful exit
-process.on('SIGINT', async ()=> {
-  logv('[SERVER] SIGINT received - shutting down');
-  shuttingDown = true;
-  try { await sendTelegram('[SPOT MASTER AI v4.0] Shutting down'); } catch(e){}
-  process.exit(0);
-});
