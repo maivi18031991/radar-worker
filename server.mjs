@@ -22,6 +22,14 @@ const SCAN_ROTATION_LIMIT = Number(process.env.SCAN_ROTATION_LIMIT || 200); // m
 const LOG_FILE = path.resolve('./spot_logs.txt');
 const ACTIVE_FILE = path.resolve('./active_spots.json');
 
+// (ADD) Verbose debug mode
+const VERBOSE = process.env.DEBUG === 'true' || false;
+function vlog(msg){
+  if(VERBOSE) {
+    console.log(`[VERBOSE] ${msg}`);
+    try { fs.appendFileSync(path.resolve('./verbose_logs.txt'), `[${new Date().toISOString()}] ${msg}\n`); } catch(e){}
+  }
+}
 // ========== UTIL ==========
 function logv(msg){
   const s = `[${new Date().toLocaleString('vi-VN')}] ${msg}`;
