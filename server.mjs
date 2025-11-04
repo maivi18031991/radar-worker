@@ -1,604 +1,607 @@
 // server_full_no_trim_v1.mjs
-// SPOT MASTER AI — Full (no-simplify) build
-// Integrates: PRE-BREAKOUT, ROTATION FLOW, EARLY PUMP, SPOT tiers (PRE/SPOT/GOLDEN/IMF),
-// Learning engine, Backtester hooks, AI Priority Filter, Multi-endpoint failover.
-// Author: consolidated for user
-// NOTE: paste whole file replacing previous server file.
+// SPOT MASTER AI - Full single-file build
+// - PreBreakout (real-data), Early Pump Detector, Spot/Golden routing
+// - Auto-rotate Binance API mirrors (handles 429/451/403/5xx)
+// - Learning engine hooks (recordSignal/checkOutcomes/auto-adjust skeleton)
+// - Push to Telegram
+// - Keep-alive ping, interval: 30s (configurable)
+// Author: integrated for ViXuan system (based on user's code)
 
-import fetchNode from "node-fetch";
+// Requires Node >=16 and install node-fetch if running in Node env:
+// npm i node-fetch
+
 import fs from "fs";
+import fsPromises from "fs/promises";
 import path from "path";
+import fetchNode from "node-fetch"; // keep for Node envs
 const fetch = (global.fetch || fetchNode);
 
-// ========== CONFIG / ENV ==========
-const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || process.env.TELEGRAM_BOT_TOKEN || "";
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || process.env.TELEGRAM_CHAT || "";
-const PRIMARY_URL = process.env.PRIMARY_URL || "";
-const SCAN_INTERVAL_MS = Number(process.env.SCAN_INTERVAL_SEC || 60) * 1000;
-const KEEP_ALIVE_MIN = Number(process.env.KEEP_ALIVE_INTERVAL || 10); // minutes
-const DATA_DIR = path.resolve(process.env.DATA_DIR || "./data");
-fs.mkdirSync(DATA_DIR, { recursive: true });
-
-// Multi-endpoint failover list (try these in order, rotate on 403/429/5xx)
-// --- Auto-rotate API mirror (includes .me global domain to bypass 451) ---
-const BINANCE_APIS = [
-  process.env.BINANCE_API || "https://api.binance.me",   // ✅ main global mirror (Asia)
-  "https://api1.binance.me",
-  "https://api2.binance.me",
-  "https://api3.binance.me",
-  "https://api-gcp.binance.com",                         // fallback (may be blocked in some regions)
+// ---------- CONFIG ----------
+const MIRRORS_DEFAULT = [
+  "https://api-gcp.binance.com",
+  "https://api1.binance.com",
+  "https://api2.binance.com",
   "https://api3.binance.com",
-  "https://data-api.binance.me"
+  "https://api4.binance.com",
+  "https://api.binance.me",
+  "https://api.binance.com"
 ];
-let apiIndex = 0;
-function currentAPI() { return BINANCE_APIS[apiIndex % BINANCE_APIS.length]; }
-function rotateAPI() { apiIndex = (apiIndex + 1) % BINANCE_APIS.length; logv(`[API] rotate -> ${currentAPI()}`); }
 
-// ========== UTIL / LOGGER ==========
+const BINANCE_MIRRORS = (process.env.BINANCE_MIRRORS && process.env.BINANCE_MIRRORS.split(",")) || MIRRORS_DEFAULT;
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || "";
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "";
+const PRIMARY_URL = process.env.PRIMARY_URL || "";
+const KEEP_ALIVE_INTERVAL_MIN = Number(process.env.KEEP_ALIVE_INTERVAL || 10); // minutes
+const SCAN_INTERVAL_MS = 30 * 1000; // user requested 30s
+const DATA_DIR = path.join(process.cwd(), "data");
+const HYPER_FILE = path.join(DATA_DIR, "hyper_spikes.json");
+const LEARN_FILE = path.join(DATA_DIR, "learning.json");
+const DYN_CONFIG_FILE = path.join(DATA_DIR, "dynamic_config.json");
+
+// PreBreakout settings
+const MIN_VOL24H = Number(process.env.MIN_VOL24H || 5_000_000);
+const MAX_TICKERS = Number(process.env.MAX_TICKERS || 120);
+const CONF_THRESHOLD_SEND = Number(process.env.CONF_THRESHOLD_SEND || 70);
+const HYPER_SPIKE_THRESHOLD = Number(process.env.HYPER_SPIKE_THRESHOLD || 85);
+const KLINES_LIMIT = Number(process.env.KLINES_LIMIT || 200);
+
+// Early detector settings
+const EARLY_VOL_MULT = Number(process.env.EARLY_VOL_MULT || 2.2); // vol vs avg24h
+const EARLY_PRICE_CHANGE_MAX = Number(process.env.EARLY_PRICE_CHANGE_MAX || 10); // 24h price change threshold for "still early"
+
+// Learning engine defaults
+const TRAIN_FAST_MODE = false;
+const MIN_SIGNALS_TO_TUNE = Number(process.env.MIN_SIGNALS_TO_TUNE || 20);
+const CHECK_HOURS = Number(process.env.LEARNING_CHECK_HOURS || 24);
+
+// Logger util
 function logv(msg) {
   const s = `[${new Date().toLocaleString("vi-VN")}] ${msg}`;
   console.log(s);
-  try { fs.appendFileSync(path.join(DATA_DIR,"server_log.txt"), s + "\n"); } catch(e){}
+  try { fs.appendFileSync(path.resolve("./server_log.txt"), s + "\n"); } catch (e) {}
 }
 
-function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
+// ---------------- API rotation & safe fetch ----------------
+let SELECTED_BINANCE = null;
 
-// ========== SAFE FETCH with failover ==========
-async function safeFetchURL(pathAndQuery, opts={}, retries=3, label="BINANCE") {
-  for(let i=0;i<retries;i++){
-    const base = currentAPI();
-    const url = base + pathAndQuery;
+// Try mirrors and pick first that returns ok for 24hr endpoint
+async function autoPickBinanceAPI() {
+  for (const url of BINANCE_MIRRORS) {
     try {
-      const r = await fetch(url, opts);
-      if(!r.ok) {
-  logv(`[${label}] ${r.status} ${url}`);
-  // Auto switch for blocked or throttled endpoints
-  if([403,429,451,500,502,503].includes(r.status)) {
-    logv(`[API] Detected blocked (${r.status}) → rotating endpoint...`);
-    rotateAPI();
-  }
-        await sleep(300 * (i+1));
-        continue;
-      }
-      const contentType = r.headers.get('content-type') || '';
-      if(contentType.includes('application/json')) {
-        return await r.json();
-        logv(`[${label}] success from ${base}`);
+      const test = await fetch(`${url}/api/v3/ticker/24hr`, { method: "GET", headers: { "User-Agent": "SpotMasterAI/3.6" }, timeout: 5000 });
+      if (test && test.ok) {
+        logv(`[API] ✅ Selected working endpoint: ${url}`);
+        SELECTED_BINANCE = url;
+        return url;
       } else {
-        return await r.text();
+        logv(`[API] mirror failed (${url}) status:${test?.status}`);
       }
     } catch (e) {
-      logv(`[${label}] network error ${e.message} url=${url}`);
-      rotateAPI();
-      await sleep(300 * (i+1));
+      logv(`[API] mirror error ${url} -> ${e.message}`);
     }
   }
-  throw new Error(`${label} fetch failed for ${pathAndQuery}`);
+  // fallback to first mirror if none respond
+  SELECTED_BINANCE = BINANCE_MIRRORS[0];
+  logv(`[API] ⚠ No mirror passed test - fallback to ${SELECTED_BINANCE}`);
+  return SELECTED_BINANCE;
 }
 
-// ========== TELEGRAM SENDER ==========
-async function sendTelegram(text) {
-  if(!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
-    logv("[TELEGRAM] missing TOKEN/CHAT_ID");
-    return false;
-  }
-  const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
-  const payload = {
-    chat_id: TELEGRAM_CHAT_ID,
-    text,
-    parse_mode: "HTML",
-    disable_web_page_preview: true
-  };
+// rotate to next mirror in list (used when 429/451/403/5xx encountered)
+function rotateBinanceAPI() {
   try {
-    const r = await fetch(url, { method: "POST", headers: {'content-type':'application/json'}, body: JSON.stringify(payload) });
-    if(!r.ok) {
-      logv(`[TELEGRAM] send failed ${r.status}`);
-      return false;
-    }
-    return true;
+    const idx = BINANCE_MIRRORS.indexOf(SELECTED_BINANCE);
+    const next = BINANCE_MIRRORS[(idx + 1) % BINANCE_MIRRORS.length];
+    SELECTED_BINANCE = next;
+    logv(`[API] 🔁 rotated endpoint -> ${SELECTED_BINANCE}`);
+    return SELECTED_BINANCE;
   } catch (e) {
-    logv("[TELEGRAM] send error " + e.message);
-    return false;
+    SELECTED_BINANCE = BINANCE_MIRRORS[0];
+    return SELECTED_BINANCE;
   }
 }
 
-// ========== PERSISTENCE: active entries, learning storage ==========
-const ACTIVE_FILE = path.join(DATA_DIR,"active_entries.json");
-const LEARN_FILE = path.join(DATA_DIR,"learning.json");
-const DYNAMIC_CONFIG = path.join(DATA_DIR,"dynamic_config.json");
-
-let activeEntries = new Map();
-function loadActiveEntries(){
-  try {
-    if(fs.existsSync(ACTIVE_FILE)){
-      const raw = fs.readFileSync(ACTIVE_FILE,'utf8');
-      const obj = JSON.parse(raw||'{}');
-      for(const k of Object.keys(obj)) activeEntries.set(k, obj[k]);
-      logv(`[ENTRY] loaded ${activeEntries.size} active entries`);
-    }
-  } catch(e){ logv('[ENTRY] load error '+e.message); }
-}
-function saveActiveEntries(){
-  try{ fs.writeFileSync(ACTIVE_FILE, JSON.stringify(Object.fromEntries(activeEntries), null, 2)); }catch(e){ logv('[ENTRY] save error '+e.message); }
-}
-async function recordActive(symbol, data){
-  activeEntries.set(symbol, data);
-  saveActiveEntries();
-  logv(`[ENTRY] mark ${symbol}`);
-}
-async function clearActive(symbol){
-  if(activeEntries.has(symbol)){ activeEntries.delete(symbol); saveActiveEntries(); logv(`[ENTRY] clear ${symbol}`); }
-}
-
-// ========== LEARNING ENGINE (inlined from learning_engine.js) ==========
-const LEARN = (function(){
-  const DATA_FILE = LEARN_FILE;
-  const CONFIG_FILE = DYNAMIC_CONFIG;
-  const CHECK_HOURS = Number(process.env.LEARNING_CHECK_HOURS || 24);
-  const MIN_SIGNALS_TO_TUNE = Number(process.env.MIN_SIGNALS_TO_TUNE || 20);
-  const AUTO_SAVE_INTERVAL_H = Number(process.env.AUTO_SAVE_INTERVAL_H || 6);
-
-  async function loadData(){
-    try { const t = await fs.promises.readFile(DATA_FILE,'utf8'); return JSON.parse(t); } catch(e){ return { signals: {}, stats: {} }; }
-  }
-  async function saveData(d){ try{ await fs.promises.mkdir(path.dirname(DATA_FILE), { recursive:true }); await fs.promises.writeFile(DATA_FILE, JSON.stringify(d,null,2),'utf8'); }catch(e){ logv('[LEARN] save error '+e.message); } }
-
-  async function recordSignal(item){
-    const data = await loadData();
-    data.signals[item.symbol] = data.signals[item.symbol] || [];
-    data.signals[item.symbol].push({ id: Date.now() + "-" + Math.random().toString(36).slice(2,7), ...item, checked:false, result:null });
-    await saveData(data);
-  }
-
-  async function checkOutcome(s){
-    // check candles after s.time up to LOOK_HOURS
+// safe fetch with intelligent rotate + retries
+async function safeFetchJSON(urlPath, label = "BINANCE", retries = 2, timeoutMs = 8000) {
+  let base = SELECTED_BINANCE || (await autoPickBinanceAPI());
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const url = urlPath.startsWith("http") ? urlPath : `${base}${urlPath}`;
     try {
-      const LOOK_HOURS = Number(process.env.LEARNING_LOOK_HOURS || 24);
-      const TP_PCT = Number(s.tpPct || 0.06);
-      const SL_PCT = Number(s.slPct || 0.02);
-      const apiBasePath = `/api/v3/klines?symbol=${s.symbol}&interval=1h&limit=${LOOK_HOURS+1}`;
-      const candles = await safeFetchURL(apiBasePath, {}, 2, "LEARN-KLINES");
-      if(!Array.isArray(candles) || candles.length===0) return "NO";
-      const entry = Number(s.price);
-      let tp=false, sl=false;
-      for(const c of candles){
-        const high = Number(c[2]), low = Number(c[3]);
-        if(high >= entry*(1+TP_PCT)) tp = true;
-        if(low <= entry*(1-SL_PCT)) sl = true;
-        if(tp||sl) break;
-      }
-      if(tp && !sl) return "TP";
-      if(sl && !tp) return "SL";
-      return "NO";
-    } catch(e) {
-      logv("[LEARN] checkOutcome err "+e.message);
-      return "NO";
-    }
-  }
-
-  async function checkOutcomesForPending(){
-    const data = await loadData();
-    const now = Date.now();
-    const toCheck = [];
-    for(const sym of Object.keys(data.signals||{})){
-      for(const s of data.signals[sym]){
-        if(!s.checked && (now - new Date(s.time).getTime() >= Number(process.env.LEARNING_CHECK_HOURS || 24)*3600*1000)){
-          toCheck.push(s);
+      const res = await fetch(url, { headers: { "User-Agent": "SpotMasterAI/3.6", "Accept": "application/json" }, timeout: timeoutMs });
+      if (!res) throw new Error("No response");
+      if (!res.ok) {
+        const status = res.status;
+        logv(`[${label}] fetch ${url} failed (${status})`);
+        // rotate on client-block statuses
+        if ([429, 451, 403, 502, 503, 504].includes(status)) {
+          base = rotateBinanceAPI();
+          // try again with new base
+          await new Promise(r => setTimeout(r, 300 * (attempt + 1)));
+          continue;
         }
+        // otherwise try again after backoff
+        await new Promise(r => setTimeout(r, 300 * (attempt + 1)));
+        continue;
       }
+      const j = await res.json();
+      return j;
+    } catch (e) {
+      logv(`[${label}] fetch error for ${url}: ${e.message}`);
+      // rotate on network errors
+      base = rotateBinanceAPI();
+      await new Promise(r => setTimeout(r, 300 * (attempt + 1)));
     }
-    let checked = 0;
-    for(const s of toCheck){
-      try {
-        const res = await checkOutcome(s);
-        s.checked = true; s.result = res;
-        updateStats(data, s);
-        checked++;
-      } catch(e){ logv('[LEARN] checkOutcomes error '+e.message); }
-    }
-    if(checked) await saveData(data);
-    return checked;
   }
-
-  function updateStats(data, s){
-    data.stats = data.stats || { overall:{total:0,wins:0}, byType:{}, bySymbol:{} };
-    const st = data.stats;
-    st.overall.total++;
-    if(s.result === "TP") st.overall.wins++;
-    const t = s.type || 'UNKNOWN';
-    st.byType[t] = st.byType[t] || { total:0, wins:0 };
-    st.byType[t].total++;
-    if(s.result === "TP") st.byType[t].wins++;
-    st.bySymbol[s.symbol] = st.bySymbol[s.symbol] || { total:0, wins:0 };
-    st.bySymbol[s.symbol].total++;
-    if(s.result === "TP") st.bySymbol[s.symbol].wins++;
-  }
-
-  async function computeAdjustments(){
-    const data = await loadData();
-    const byType = data.stats?.byType || {};
-    const result = { adjust:false, reasons:[], changes:{} };
-    for(const [type, rec] of Object.entries(byType)){
-      if(rec.total < MIN_SIGNALS_TO_TUNE) continue;
-      const wr = rec.wins / rec.total;
-      if(wr < 0.45){
-        result.adjust = true; result.reasons.push(`${type} WR ${Math.round(wr*100)}% → tighten`);
-        result.changes[type] = { rsiMinDelta: +3, volMinPctDelta: +10 };
-      } else if (wr > 0.75){
-        result.adjust = true; result.reasons.push(`${type} WR ${Math.round(wr*100)}% → relax`);
-        result.changes[type] = { rsiMinDelta: -2, volMinPctDelta: -5 };
-      }
-    }
-    if(result.adjust) await applyAdjustments(result.changes);
-    return result;
-  }
-
-  async function applyAdjustments(changes){
-    try {
-      let cfg = {};
-      try { cfg = JSON.parse(fs.readFileSync(CONFIG_FILE,'utf8')); } catch(e){}
-      for(const [k,v] of Object.entries(changes)){ cfg[k] = { ...(cfg[k]||{}), ...v }; }
-      fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg,null,2));
-      logv("[LEARN] dynamic config updated");
-      return cfg;
-    } catch(e){ logv("[LEARN] applyAdjustments err "+e.message); }
-  }
-
-  // periodic check
-  setInterval(async ()=>{
-    try {
-      const checked = await checkOutcomesForPending();
-      if(checked>0){
-        const adj = await computeAdjustments();
-        logv(`[LEARN] quick check done ${checked} | adjust=${adj.adjust}`);
-      }
-    } catch(e){ logv("[LEARN] periodic err "+e.message); }
-  }, Number(process.env.LEARN_PERIOD_MIN || 60)*60*1000);
-
-  return { recordSignal, checkOutcomesForPending, computeAdjustments, loadData: loadData, quickLearn48h: async ()=>{ logv("[LEARN] quickLearn called"); } };
-})();
-
-// ========== INDICATORS / HELPERS ==========
-function sma(arr, n=20){ if(!arr || arr.length===0) return NaN; const slice = arr.slice(-n); return slice.reduce((s,v)=>s+Number(v),0)/slice.length; }
-function stddev(arr, n=20){ const slice = arr.slice(-n); const m = sma(slice, slice.length); const v = slice.reduce((s,x)=>s + (x-m)**2,0)/slice.length; return Math.sqrt(v); }
-function bollingerWidth(closeArr, period=14, mult=2){ const mb = sma(closeArr, period); const sd = stddev(closeArr, period); const up = mb + mult*sd; const dn = mb - mult*sd; const width = (up - dn) / (mb || 1); return { mb, up, dn, width }; }
-function rsiFromArray(closes, period=14){ if(!closes || closes.length < period+1) return NaN; let gains=0, losses=0; for(let i=closes.length-period;i<closes.length;i++){ const d = closes[i] - closes[i-1]; if(d>0) gains+=d; else losses+=Math.abs(d); } const avgGain = gains/period; const avgLoss = losses/period; if(avgLoss === 0) return 100; const rs = avgGain/avgLoss; return 100 - (100/(1+rs)); }
-function fmt(n, d=8){ return (typeof n === 'number') ? Number(n.toFixed(d)) : n; }
-
-// ========== PRE-BREAKOUT (rotation_prebreakout inlined) ==========
-const PRE_CONFIG = {
-  MIN_VOL24H: Number(process.env.MIN_VOL24H || 5_000_000),
-  MAX_TICKERS: Number(process.env.MAX_TICKERS || 120),
-  CONF_THRESHOLD_SEND: Number(process.env.PRE_CONF_SEND || 70),
-  HYPER_SPIKE_THRESHOLD: Number(process.env.HYPER_SPIKE_THRESHOLD || 85),
-  KLINES_LIMIT: Number(process.env.KLINES_LIMIT || 200)
-};
-const HYPER_FILE = path.join(DATA_DIR, "hyper_spikes.json");
-async function ensureDataDir(){ try{ await fs.promises.mkdir(DATA_DIR, { recursive:true }); }catch(e){} }
-async function readHyperSpikes(){ try{ const t = await fs.promises.readFile(HYPER_FILE,'utf8'); return JSON.parse(t||'[]'); }catch(e){ return []; } }
-async function writeHyperSpikes(arr){ await ensureDataDir(); await fs.promises.writeFile(HYPER_FILE, JSON.stringify(arr,null,2),'utf8'); }
-
-async function get24hTickerAll(){
-  const path = `/api/v3/ticker/24hr`;
-  return await safeFetchURL(path, {}, 2, "24H-TICKER");
-}
-async function getKlines(symbol, interval="1h", limit=PRE_CONFIG.KLINES_LIMIT){
-  const path = `/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
-  return await safeFetchURL(path, {}, 2, "KLINES");
+  throw new Error(`${label} fetch failed after ${retries + 1} attempts`);
 }
 
-function isCompressedDetect({ price, mb, up, dn, bbWidth, MA20 }){
-  if(bbWidth > 0.08) return false;
+// ------------------ FS helpers ------------------
+async function ensureDataDir() {
+  try { await fsPromises.mkdir(DATA_DIR, { recursive: true }); } catch (e) {}
+}
+async function readHyperSpikes() {
+  try { const txt = await fsPromises.readFile(HYPER_FILE, "utf8"); return JSON.parse(txt || "[]"); } catch (e) { return []; }
+}
+async function writeHyperSpikes(arr) {
+  try { await ensureDataDir(); await fsPromises.writeFile(HYPER_FILE, JSON.stringify(arr, null, 2), "utf8"); } catch (e) { logv("[FS] writeHyperSpikes error " + e.message); }
+}
+async function loadLearningData() {
+  try { const txt = await fsPromises.readFile(LEARN_FILE, "utf8"); return JSON.parse(txt); } catch (e) { return { signals: {}, stats: {} }; }
+}
+async function saveLearningData(d) {
+  try { await ensureDataDir(); await fsPromises.writeFile(LEARN_FILE, JSON.stringify(d, null, 2), "utf8"); } catch (e) { logv("[LEARN] save error " + e.message); }
+}
+async function saveDynamicConfig(cfg) {
+  try { await ensureDataDir(); await fsPromises.writeFile(DYN_CONFIG_FILE, JSON.stringify(cfg, null, 2), "utf8"); } catch (e) { logv("[LEARN] save dyn config error " + e.message); }
+}
+
+// ------------------ Indicators & utils ------------------
+function sma(arr, n) {
+  if (!arr || !arr.length) return NaN;
+  const slice = arr.slice(-n);
+  return slice.reduce((s, v) => s + v, 0) / slice.length;
+}
+function stddev(arr, n) {
+  const slice = arr.slice(-n);
+  const m = sma(slice, slice.length);
+  const v = slice.reduce((s, x) => s + (x - m) ** 2, 0) / slice.length;
+  return Math.sqrt(v);
+}
+function bollingerWidth(closeArr, period = 14, mult = 2) {
+  const mb = sma(closeArr, period);
+  const sd = stddev(closeArr, period);
+  const up = mb + mult * sd;
+  const dn = mb - mult * sd;
+  const width = (up - dn) / (mb || 1);
+  return { mb, up, dn, width };
+}
+function rsiFromArray(closes, period = 14) {
+  if (!closes || closes.length < period + 1) return NaN;
+  let gains = 0, losses = 0;
+  for (let i = closes.length - period; i < closes.length; i++) {
+    const diff = closes[i] - closes[i - 1];
+    if (diff >= 0) gains += diff; else losses += Math.abs(diff);
+  }
+  const avgGain = gains / period;
+  const avgLoss = losses / period;
+  if (avgLoss === 0) return 100;
+  const rs = avgGain / avgLoss;
+  return 100 - (100 / (1 + rs));
+}
+function klinesCloseArray(klines) { return klines.map(k => Number(k[4])); }
+function klinesVolumeArray(klines) { return klines.map(k => Number(k[5])); }
+
+// ------------------ Confidence & compression ------------------
+function computeConf({ RSI_H4, RSI_H1, VolNowRatio, BBWidth_H4, BTC_RSI }) {
+  let Conf = 0;
+  if (RSI_H4 > 45 && RSI_H4 < 60) Conf += 0.25;
+  if (RSI_H1 > 50 && RSI_H1 < 70) Conf += 0.20;
+  if (VolNowRatio > 1.8 && VolNowRatio < 3.5) Conf += 0.20;
+  if (BBWidth_H4 < 0.6 * 1.0) Conf += 0.15;
+  if (BTC_RSI > 35 && BTC_RSI < 65) Conf += 0.15;
+  if (RSI_H1 > 75 || VolNowRatio > 4.5) Conf -= 0.15;
+  Conf = Math.min(Math.max(Conf, 0), 1) * 100;
+  return Math.round(Conf);
+}
+function isCompressed({ price, mb, up, dn, bbWidth, MA20 }) {
+  if (bbWidth > 0.08) return false;
   const nearMA20 = Math.abs(price - MA20) / (MA20 || 1) < 0.03;
   const nearMiddle = Math.abs(price - mb) / (mb || 1) < 0.06;
   const notNearUpper = price < (mb + (up - mb) * 0.7);
   return (nearMA20 || nearMiddle) && notNearUpper;
 }
 
-async function scanRotationFlowCore(){
-  try{
-    const all = await get24hTickerAll();
-    const usdt = all.filter(t=> t.symbol && t.symbol.endsWith("USDT"))
-      .map(t=> ({ symbol: t.symbol, vol24: Number(t.quoteVolume || t.volume || 0), baseVol: Number(t.volume || 0), priceChangePercent: Number(t.priceChangePercent || 0) }))
-      .filter(t=> t.vol24 >= PRE_CONFIG.MIN_VOL24H)
-      .sort((a,b)=> b.vol24 - a.vol24)
-      .slice(0, PRE_CONFIG.MAX_TICKERS);
+// ------------------ Telegram ------------------
+async function sendTelegram(text) {
+  if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
+    logv("[TELEGRAM] missing TOKEN/CHAT_ID");
+    return;
+  }
+  const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
+  const payload = { chat_id: TELEGRAM_CHAT_ID, text, parse_mode: "HTML", disable_web_page_preview: true };
+  try {
+    const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+    if (!res.ok) logv(`[TELEGRAM] send failed ${res.status}`);
+  } catch (e) {
+    logv("[TELEGRAM] error " + e.message);
+  }
+}
 
-    if(!usdt.length) { logv("[PRE] no tickers pass volume"); return []; }
+// Unified push
+async function pushSignal(tag, data, conf = 70) {
+  try {
+    if (!data || !data.symbol) return;
+    const sym = data.symbol.replace("USDT", "");
+    const vol = (data.quoteVolume || data.VolNow || 0).toLocaleString();
+    const chg = data.priceChangePercent || data.change24h || 0;
+    const note = data.note || "Auto signal";
+    const msg = `
+<b>${tag}</b> ${sym}USDT
+Δ24h: <b>${(typeof chg === "number" ? chg.toFixed(2) : Number(chg || 0).toFixed(2))}%</b> | Conf: ${conf}%
+Vol: ${vol}
+Note: ${note}
+Time: ${new Date().toLocaleString("en-GB", { timeZone: "Asia/Ho_Chi_Minh" })}
+`;
+    if (TELEGRAM_TOKEN && TELEGRAM_CHAT_ID) await sendTelegram(msg);
+    logv("[PUSH] " + sym + " " + (typeof chg === "number" ? chg.toFixed(2) : Number(chg || 0).toFixed(2)) + "% sent");
+  } catch (err) {
+    console.error("[pushSignal ERROR]", err.message || err);
+  }
+}
 
+// ------------------ PreBreakout core (rotation) ------------------
+async function get24hTickers() {
+  // returns array
+  const j = await safeFetchJSON(`/api/v3/ticker/24hr`, "BINANCE 24h", 2, 7000);
+  if (!Array.isArray(j)) throw new Error("24hr ticker response not array");
+  return j;
+}
+async function getKlines(symbol, interval = "1h", limit = KLINES_LIMIT) {
+  const q = `/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
+  const j = await safeFetchJSON(q, "BINANCE KLINES", 2, 9000);
+  if (!Array.isArray(j)) throw new Error(`klines not array for ${symbol}`);
+  return j;
+}
+
+async function scanRotationFlow() {
+  try {
+    const all24 = await get24hTickers(); // may throw
+    const usdt = all24.filter(t => t.symbol && t.symbol.endsWith("USDT"))
+      .map(t => ({ symbol: t.symbol, vol24: Number(t.quoteVolume || t.volume || 0), baseVolume: Number(t.volume || 0), priceChangePercent: Number(t.priceChangePercent || 0), quoteVolume: Number(t.quoteVolume || 0) }))
+      .filter(t => t.vol24 >= MIN_VOL24H)
+      .sort((a,b) => b.vol24 - a.vol24)
+      .slice(0, MAX_TICKERS);
+    if (!usdt.length) {
+      logv("[ROTATION] no USDT tickers pass min vol");
+      return [];
+    }
     const results = [];
     const hyper = await readHyperSpikes();
-
-    // BTC RSI for bias
+    // btc rsi
     let BTC_RSI = 50;
-    try{
-      const btc4 = await getKlines("BTCUSDT","4h",100);
-      BTC_RSI = rsiFromArray(btc4.map(k=>Number(k[4])), 14) || BTC_RSI;
-    } catch(e){}
-
-    for(const t of usdt){
-      try{
-        const kl4 = await getKlines(t.symbol, "4h", 100).catch(()=>[]);
-        const kl1 = await getKlines(t.symbol, "1h", 100).catch(()=>[]);
-        if(!kl4.length || !kl1.length) continue;
-
-        const closes4 = kl4.map(k=>Number(k[4]));
-        const closes1 = kl1.map(k=>Number(k[4]));
-        const vols1 = kl1.map(k=>Number(k[5]));
-
-        const RSI_H4 = Number((rsiFromArray(closes4,14)||0).toFixed(1));
-        const RSI_H1 = Number((rsiFromArray(closes1,14)||0).toFixed(1));
-        const bb = bollingerWidth(closes4,14,2);
-        const BBWidth_H4 = Number((bb.width||0).toFixed(4));
-        const MA20 = Number((sma(closes4,20)||0).toFixed(6));
-        const VolNow = Number(vols1[vols1.length-1]||0);
-        const avg24base = Math.max(1, (t.baseVol||1)/24);
-        const VolNowRatio = Number((VolNow / avg24base).toFixed(2));
-        const price = closes1[closes1.length-1];
-
-        // conf formula (as doc)
-        let Conf=0;
-        if(RSI_H4>45 && RSI_H4<60) Conf += 0.25;
-        if(RSI_H1>50 && RSI_H1<70) Conf += 0.20;
-        if(VolNowRatio>1.8 && VolNowRatio<3.5) Conf += 0.20;
-        if(BBWidth_H4 < 0.6 * 1.0) Conf += 0.15;
-        if(BTC_RSI >35 && BTC_RSI<65) Conf += 0.15;
-        if(RSI_H1>75 || VolNowRatio>4.5) Conf -= 0.15;
-        Conf = Math.min(Math.max(Conf,0),1)*100;
-        Conf = Math.round(Conf);
-
-        const compressed = isCompressedDetect({ price, mb: bb.mb, up: bb.up, dn: bb.dn, bbWidth: BBWidth_H4, MA20 });
-
+    try {
+      const btc1h = await getKlines("BTCUSDT", "1h", 100);
+      BTC_RSI = rsiFromArray(klinesCloseArray(btc1h), 14);
+    } catch (e) {}
+    for (const t of usdt) {
+      try {
+        const k4 = await getKlines(t.symbol, "4h", 100).catch(()=>[]);
+        const k1 = await getKlines(t.symbol, "1h", 100).catch(()=>[]);
+        if (!k4.length || !k1.length) continue;
+        const closes4 = klinesCloseArray(k4);
+        const closes1 = klinesCloseArray(k1);
+        const vols1 = klinesVolumeArray(k1);
+        const RSI_H4 = Number((rsiFromArray(closes4, 14) || 0).toFixed(1));
+        const RSI_H1 = Number((rsiFromArray(closes1, 14) || 0).toFixed(1));
+        const bb = bollingerWidth(closes4, 14, 2);
+        const BBWidth_H4 = Number((bb.width || 0).toFixed(3));
+        const MA20 = Number((sma(closes4, 20) || closes4[closes4.length-1]).toFixed(6));
+        const VolNow = Number(vols1[vols1.length - 1] || 0);
+        const avg24h_base = Number(t.baseVolume || 1) / 24;
+        const VolNowRatio = avg24h_base ? Number((VolNow / avg24h_base).toFixed(2)) : 1;
+        const price = Number(closes1[closes1.length - 1] || 0);
+        const Conf = computeConf({ RSI_H4, RSI_H1, VolNowRatio, BBWidth_H4, BTC_RSI });
+        const compressed = isCompressed({ price, mb: bb.mb, up: bb.up, dn: bb.dn, bbWidth: BBWidth_H4, MA20 });
         const res = {
           symbol: t.symbol,
-          price, RSI_H4, RSI_H1, BBWidth_H4, VolNowRatio,
-          MA20, Conf, compressed, priceChangePercent: t.priceChangePercent
+          price,
+          RSI_H4, RSI_H1,
+          BBWidth_H4,
+          VolNow,
+          VolNowRatio,
+          MA20,
+          Conf,
+          BTC_RSI: Number((BTC_RSI || 0).toFixed(1)),
+          compressed,
+          quoteVolume: t.quoteVolume || 0,
+          priceChangePercent: t.priceChangePercent || 0,
         };
-
-        if(Conf >= PRE_CONFIG.CONF_THRESHOLD_SEND && compressed) {
-          // send alert (server will handle push)
-          logv(`[PRE] candidate ${t.symbol} Conf=${Conf}`);
+        if (Conf >= CONF_THRESHOLD_SEND && compressed) {
+          logv(`[PREBREAKOUT] ${t.symbol} Conf=${Conf}`);
         }
-        if(Conf >= PRE_CONFIG.HYPER_SPIKE_THRESHOLD && compressed){
-          hyper.push({...res, ts: Date.now()});
-        }
+        if (Conf >= HYPER_SPIKE_THRESHOLD && compressed) hyper.push({ ...res, ts: Date.now() });
         results.push(res);
-      } catch(e){
-        logv(`[PRE] error ${t.symbol} ${e.message}`);
+      } catch (e) {
+        console.log("[ROTATION] err for", t.symbol, e?.message || e);
       }
     }
-
-    if(hyper.length) await writeHyperSpikes(hyper.slice(-500));
-    results.sort((a,b)=> b.Conf - a.Conf);
-    logv(`[PRE] scanned ${results.length} symbols, top: ${results[0]?.symbol || 'none'} ${results[0]?.Conf || 0}%`);
+    if (hyper.length) await writeHyperSpikes(hyper.slice(-500));
+    results.sort((a,b) => b.Conf - a.Conf);
+    logv(`[ROTATION] scanned ${results.length} symbols, top: ${results[0]?.symbol || "none"} ${results[0]?.Conf || 0}%`);
     return results;
-  } catch(e){
-    logv('[PRE] main error '+e.message);
+  } catch (err) {
+    logv("[ROTATION] main error: " + err.message);
     return [];
   }
 }
-async function scanPreBreakout(){
-  const data = await scanRotationFlowCore();
-  if(!Array.isArray(data)) return [];
-  // keep any with Conf >= 60
-  const valid = data.filter(x => x.symbol && x.Conf >= 60);
-  logv(`[PRE] returning ${valid.length} valid signals`);
-  return valid;
+async function scanPreBreakout() {
+  try {
+    const data = await scanRotationFlow();
+    if (!Array.isArray(data)) return [];
+    const valid = data.filter(x => x.symbol && x.Conf >= 60);
+    logv(`[PREBREAKOUT] xuất ${valid.length} tín hiệu hợp lệ`);
+    return valid;
+  } catch (e) {
+    logv("[PREBREAKOUT] lỗi: " + e.message);
+    return [];
+  }
 }
 
-// ========== EARLY PUMP DETECTOR (inlined simplified) ==========
-async function scanEarlyPump(){
-  try{
-    // Scans 24h tickers, picks those with high volatility but not yet exploded (early)
-    const all = await get24hTickerAll();
-    const candidates = all.filter(t=> t.symbol && t.symbol.endsWith("USDT"))
-      .map(t=> ({ symbol: t.symbol, change: Number(t.priceChangePercent||0), vol: Number(t.quoteVolume||0) }))
-      .filter(t=> t.vol > (Number(process.env.EARLY_MIN_VOL || 1_000_000)))
-      .sort((a,b)=> b.change - a.change)
-      .slice(0, 200);
+// ------------------ Early Pump Detector ------------------
+async function scanEarlyPump() {
+  try {
+    const all24 = await get24hTickers();
+    const usdt = all24.filter(t => t.symbol && t.symbol.endsWith("USDT"))
+      .map(t => ({ symbol: t.symbol, vol24: Number(t.quoteVolume || t.volume || 0), baseVolume: Number(t.volume || 0), priceChangePercent: Number(t.priceChangePercent || 0), quoteVolume: Number(t.quoteVolume || 0) }))
+      .filter(t => t.vol24 >= 200_000) // lower threshold so early can see smaller but real moves
+      .sort((a,b) => Number(b.priceChangePercent) - Number(a.priceChangePercent))
+      .slice(0, 250); // scan reasonable set for early signals
 
     const results = [];
-    for(const c of candidates){
-      try{
-        // quick fetch 1h klines
-        const kl1 = await getKlines(c.symbol, "1h", 24);
-        const closes1 = kl1.map(k=>Number(k[4]));
-        const rsi1 = rsiFromArray(closes1,14) || 50;
-        // early criteria: moderate daily increase but RSI not too high, vol spike ratio moderate
-        if(c.change >= 5 && c.change <= 40 && rsi1 >= 45 && rsi1 <= 70){
-          const volNow = Number(kl1.at(-1)?.[5] || 0);
-          const avgVol1h = (kl1.reduce((s,k)=>s+Number(k[5]),0)/kl1.length) || 1;
-          const volRatio = volNow / Math.max(1, avgVol1h);
-          const conf = Math.min(95, Math.round(30 + Math.min(60, c.change) + Math.min(40, volRatio*10)));
-          results.push({ symbol: c.symbol, change24: c.change, vol: c.vol, rsi1: rsi1, volRatio, conf, note: "EARLY_PUMP" });
+    for (const t of usdt) {
+      try {
+        // simple early heuristic: 1h vol spike vs avg24h_base and priceChange not already huge
+        const k1 = await getKlines(t.symbol, "1h", 24).catch(()=>[]);
+        if (!k1.length) continue;
+        const vols1 = klinesVolumeArray(k1);
+        const VolNow = Number(vols1[vols1.length - 1] || 0);
+        const avg24h_base = Number(t.baseVolume || 1) / 24;
+        const volRatio = avg24h_base ? VolNow / avg24h_base : 1;
+        const priceChange = Number(t.priceChangePercent || 0);
+        if (volRatio >= EARLY_VOL_MULT && priceChange <= EARLY_PRICE_CHANGE_MAX) {
+          results.push({ symbol: t.symbol, volRatio: Number(volRatio.toFixed(2)), priceChange, quoteVolume: t.quoteVolume, note: "Early volume spike", conf: Math.min(90, 50 + Math.round((volRatio - 1) * 10)) });
         }
-      } catch(e){ /* ignore per symbol */ }
+      } catch (e) {
+        // continue
+      }
     }
-    results.sort((a,b)=> b.conf - a.conf);
-    logv(`[EARLY] found ${results.length} early pumps`);
-    return results;
-  } catch(e){
-    logv("[EARLY] err " + e.message);
+    results.sort((a,b) => b.conf - a.conf);
+    logv(`[EARLY] found ${results.length} early candidates`);
+    return results.slice(0, 30);
+  } catch (e) {
+    logv("[EARLY] error " + e.message);
     return [];
   }
 }
 
-// ========== ROTATION FLOW (simpler wrapper calling scanRotationFlowCore) ==========
-async function rotationFlowScan(){
-  // reuse scanRotationFlowCore as rotation flow detection
-  const res = await scanRotationFlowCore();
-  // Optionally push top X to telegram as rotation flow signals
-  // but server main will decide
-  return res;
-}
-
-// ========== AI PRIORITY FILTER ==========
-async function aiPriorityFilter(preList, earlyList){
-  try{
-    const map = new Map();
-    for(const p of preList){
-      const s = map.get(p.symbol) || { symbol: p.symbol, score:0, sources: new Set() };
-      s.score += p.Conf || 60; s.sources.add('PRE'); map.set(p.symbol, s);
-    }
-    for(const e of earlyList){
-      const s = map.get(e.symbol) || { symbol: e.symbol, score:0, sources: new Set() };
-      s.score += e.conf || 60; s.sources.add('EARLY'); map.set(e.symbol, s);
-    }
-    const arr = Array.from(map.values()).map(x=>{
-      const synergy = (x.sources.size>1) ? 1.15 : 1.0;
-      return { symbol: x.symbol, finalConf: Math.round(Math.min(x.score * synergy, 200)), sources: Array.from(x.sources) };
-    }).sort((a,b)=> b.finalConf - a.finalConf);
-    return arr;
-  } catch(e){ logv('[AI] err '+e.message); return []; }
-}
-
-// ========== PUSH SIGNAL builder ==========
-async function pushSignal(tag, data, conf=70){
+// ------------------ Learning Engine (basic integ) ------------------
+async function recordSignalLearning(item) {
   try {
-    if(!data || !data.symbol) return;
-    const sym = data.symbol;
-    const chg = data.priceChangePercent || data.change24 || data.change24h || 0;
-    const vol = Number(data.quoteVolume || data.vol || 0);
-    const rsi = data.RSI_H1 || data.rsi1 || data.RSI_H4 || 0;
-    const msg = [
-      `<b>${tag}</b> ${sym}`,
-      `Conf: ${conf}%`,
-      `24h: ${chg}% | Vol: ${Math.round(vol)}`,
-      `RSI: ${rsi}`,
-      `Note: ${data.note || data.type || ''}`,
-      `Time: ${new Date().toLocaleString('vi-VN')}`
-    ].join('\n');
-    await sendTelegram(msg);
-    logv(`[PUSH] ${tag} ${sym} conf=${conf}`);
-  } catch(e) { logv('[PUSH] err '+e.message); }
+    const data = await loadLearningData();
+    data.signals[item.symbol] = data.signals[item.symbol] || [];
+    data.signals[item.symbol].push({
+      id: Date.now() + "-" + Math.random().toString(36).slice(2,6),
+      ...item,
+      time: new Date().toISOString(),
+      checked: false,
+      result: null
+    });
+    await saveLearningData(data);
+    logv(`[LEARN] recorded ${item.symbol}`);
+  } catch (e) {
+    logv("[LEARN] record error " + e.message);
+  }
 }
 
-// ========== EXIT TRACKER: check TP/SL for active entries ==========
-async function checkActiveExits(){
-  try{
-    if(activeEntries.size === 0) return;
-    logv(`[EXIT] checking ${activeEntries.size} active entries`);
-    for(const [sym, data] of Array.from(activeEntries.entries())){
-      try{
-        // fetch recent candles 1h (limit 24)
-        const path = `/api/v3/klines?symbol=${sym}&interval=1h&limit=24`;
-        const kl = await safeFetchURL(path, {}, 2, "EXIT-KLINES");
-        if(!Array.isArray(kl) || !kl.length) continue;
-        const lastClose = Number(kl.at(-1)[4]);
-        const sl = Number(data.sl), tp = Number(data.tp), entry = Number(data.entry);
-        let exitReason = null;
-        if(lastClose <= sl) exitReason = 'SL hit';
-        if(lastClose >= tp) exitReason = 'TP hit';
-        // additional: MA20 cross check
-        const closes = kl.map(k=>Number(k[4]));
-        const ma20 = sma(closes, 20);
-        if(data.side === 'LONG' && lastClose < ma20 * 0.995) exitReason = exitReason || 'MA20 breach';
-        if(exitReason){
-          const msg = [
-            `<b>[EXIT] ${sym}</b>`,
-            `Reason: ${exitReason}`,
-            `Entry: ${entry} | Now: ${lastClose}`,
-            `SL: ${sl} | TP: ${tp}`,
-            `Type: ${data.type || 'SPOT'}`,
-            `Time: ${new Date().toLocaleString('vi-VN')}`
-          ].join('\n');
-          await sendTelegram(msg);
-          logv(`[EXIT] ${sym} reason=${exitReason}`);
-          await clearActive(sym);
-        }
-      } catch(e){ logv(`[EXIT] ${sym} err ${e.message}`); }
-    }
-  } catch(e){ logv('[EXIT] fatal '+e.message); }
-}
-
-// ========== BACKTESTER hook (placeholder) ==========
-async function backtestSignal(signal){
-  // optional: call local backtester.js if present
-  try{
-    const btPath = path.join(process.cwd(), 'backtester.js');
-    if(fs.existsSync(btPath)){
-      // naive require
-      const mod = require(btPath);
-      if(typeof mod.backtest === 'function') {
-        return await mod.backtest(signal);
+// check outcomes for pending signals (non-blocking)
+async function checkOutcomesForPending() {
+  try {
+    const data = await loadLearningData();
+    const now = Date.now();
+    const toCheck = [];
+    for (const sym of Object.keys(data.signals || {})) {
+      for (const s of data.signals[sym]) {
+        if (!s.checked && now - new Date(s.time).getTime() >= CHECK_HOURS * 3600 * 1000) toCheck.push(s);
       }
     }
-  } catch(e){ logv('[BACKTEST] err '+e.message); }
-  return null;
+    let checked = 0;
+    for (const s of toCheck) {
+      try {
+        const res = await checkOutcome(s);
+        s.checked = true;
+        s.result = res;
+        updateStats(data, s);
+        checked++;
+      } catch (e) {}
+    }
+    if (checked) await saveLearningData(data);
+    return checked;
+  } catch (e) {
+    logv("[LEARN] checkOutcomes error " + e.message);
+    return 0;
+  }
 }
 
-// ========== MAIN LOOP ==========
-loadActiveEntries();
+async function checkOutcome(signal) {
+  try {
+    const LOOK_HOURS = Number(process.env.LEARNING_LOOK_HOURS || 24);
+    const TP_PCT = Number(signal.tpPct || 0.06);
+    const SL_PCT = Number(signal.slPct || 0.02);
+    const apiBase = process.env.API_BASE_SPOT || SELECTED_BINANCE || BINANCE_MIRRORS[0];
+    if (!apiBase) return "NO";
+    const url = `${apiBase}/api/v3/klines?symbol=${signal.symbol}&interval=1h&limit=${LOOK_HOURS + 1}`;
+    const r = await fetch(url);
+    if (!r.ok) return "NO";
+    const candles = await r.json();
+    if (!Array.isArray(candles) || !candles.length) return "NO";
+    const entry = Number(signal.price);
+    let tp = false, sl = false;
+    for (const c of candles) {
+      const high = Number(c[2]);
+      const low = Number(c[3]);
+      if (high >= entry * (1 + TP_PCT)) tp = true;
+      if (low <= entry * (1 - SL_PCT)) sl = true;
+      if (tp || sl) break;
+    }
+    if (tp && !sl) return "TP";
+    if (sl && !tp) return "SL";
+    return "NO";
+  } catch (e) {
+    return "NO";
+  }
+}
 
-async function mainCycle(){
-  logv('[MAIN] cycle start');
+function updateStats(data, s) {
+  data.stats = data.stats || { overall: { total: 0, wins: 0 }, byType: {}, bySymbol: {} };
+  const st = data.stats;
+  st.overall.total++;
+  if (s.result === "TP") st.overall.wins++;
+  const t = s.type || "UNKNOWN";
+  st.byType[t] = st.byType[t] || { total: 0, wins: 0 };
+  st.byType[t].total++;
+  if (s.result === "TP") st.byType[t].wins++;
+  st.bySymbol[s.symbol] = st.bySymbol[s.symbol] || { total: 0, wins: 0 };
+  st.bySymbol[s.symbol].total++;
+  if (s.result === "TP") st.bySymbol[s.symbol].wins++;
+}
 
-  try{
-    // 1) Pre-breakout scan
+async function computeAdjustments() {
+  try {
+    const data = await loadLearningData();
+    const byType = data.stats?.byType || {};
+    const result = { adjust: false, reasons: [], changes: {} };
+    for (const [type, rec] of Object.entries(byType)) {
+      if (rec.total < MIN_SIGNALS_TO_TUNE) continue;
+      const wr = rec.wins / rec.total;
+      if (wr < 0.45) {
+        result.adjust = true;
+        result.reasons.push(`${type} WR ${Math.round(wr * 100)}% → tighten`);
+        result.changes[type] = { rsiMinDelta: +3, volMinPctDelta: +10 };
+      } else if (wr > 0.75) {
+        result.adjust = true;
+        result.reasons.push(`${type} WR ${Math.round(wr * 100)}% → relax`);
+        result.changes[type] = { rsiMinDelta: -2, volMinPctDelta: -5 };
+      }
+    }
+    if (result.adjust) {
+      await applyAdjustments(result.changes);
+    }
+    return result;
+  } catch (e) {
+    logv("[LEARN] computeAdjustments error " + e.message);
+    return { adjust: false };
+  }
+}
+async function applyAdjustments(changes) {
+  try {
+    let cfg = {};
+    try { cfg = JSON.parse(fs.readFileSync(DYN_CONFIG_FILE, "utf8")); } catch (e) { cfg = {}; }
+    for (const [key, val] of Object.entries(changes)) {
+      cfg[key] = { ...(cfg[key] || {}), ...val };
+    }
+    await saveDynamicConfig(cfg);
+    logv("[LEARN] dynamic config updated");
+    return cfg;
+  } catch (e) {
+    logv("[LEARN] applyAdjustments error " + e.message);
+  }
+}
+
+// schedule learning cycle
+setInterval(async () => {
+  try {
+    const checked = await checkOutcomesForPending();
+    if (checked > 0) {
+      const adj = await computeAdjustments();
+      logv("[LEARN] cycle complete: " + JSON.stringify(adj));
+    }
+  } catch (e) {
+    logv("[LEARN] periodic error " + e.message);
+  }
+}, 6 * 3600 * 1000); // every 6h
+
+// ------------------ MAIN server loop ------------------
+async function mainLoop() {
+  logv("[MAIN] cycle started");
+  try {
+    // Run PreBreakout scan
     const preList = await scanPreBreakout();
-    if(preList && preList.length){
-      for(const p of preList){
-        const conf = (p.Conf || p.conf || 75);
-        await pushSignal('[PRE-BREAKOUT]', p, conf);
-        await LEARN.recordSignal({ symbol: p.symbol, type: 'PRE', time: new Date().toISOString(), price: p.price, tpPct: 0.06, slPct: 0.02 });
+    if (preList && preList.length > 0) {
+      for (const coin of preList) {
+        const conf = coin.Conf || coin.conf || 75;
+        // tag heuristics (could be improved by learning_engine)
+        const tag = coin.type === "IMF" ? "[FLOW]" : coin.type === "GOLDEN" ? "[GOLDEN]" : "[PRE]";
+        // push
+        await pushSignal(tag, coin, conf);
+        // record to learning engine with extra fields
+        await recordSignalLearning({ symbol: coin.symbol, price: coin.price, type: "PRE", conf, time: new Date().toISOString() });
       }
+      logv(`[MAIN] ${preList.length} coins processed`);
+    } else {
+      logv("[MAIN] no breakout candidates found");
     }
 
-    // 2) rotation flow (spot)
-    const rot = await rotationFlowScan(); // rot is array
-    // optionally push tops (we push top few)
-    if(rot && rot.length){
-      for(let i=0;i<Math.min(3, rot.length); i++){
-        const r = rot[i];
-        await pushSignal('[ROTATION]', r, r.Conf || r.Conf);
-        // record to learning
-        await LEARN.recordSignal({ symbol: r.symbol, type: 'ROTATION', time: new Date().toISOString(), price: r.price, tpPct: 0.06, slPct: 0.02 });
+    // Early detector
+    const earlyList = await scanEarlyPump();
+    if (earlyList && earlyList.length) {
+      for (const e of earlyList) {
+        await pushSignal("[EARLY]", { symbol: e.symbol, priceChangePercent: e.priceChange, quoteVolume: e.quoteVolume, note: e.note }, e.conf);
+        await recordSignalLearning({ symbol: e.symbol, price: null, type: "EARLY", conf: e.conf, time: new Date().toISOString() });
       }
+      logv(`[MAIN] EARLY ${earlyList.length} pushed`);
     }
 
-    // 3) early pump scan
-    const early = await scanEarlyPump();
-    if(early && early.length){
-      for(const e of early.slice(0,5)){
-        await pushSignal('[EARLY]', e, e.conf || 70);
-        await LEARN.recordSignal({ symbol: e.symbol, type: 'EARLY', time: new Date().toISOString(), price: e.price || 0, tpPct: 0.06, slPct: 0.02 });
-      }
-    }
-
-    // 4) AI Priority filter - combine lists
-    try {
-      const merged = await aiPriorityFilter(preList || [], early || []);
-      if(merged && merged.length){
-        for(const m of merged.slice(0,3)){
-          if(m.finalConf >= 120){
-            await sendTelegram(`<b>[AI PRIORITY]</b> ${m.symbol}\nAI Conf: ${m.finalConf}%\nSources: ${m.sources.join(', ')}\nTime: ${new Date().toLocaleString('vi-VN')}`);
-            logv(`[AI] push ${m.symbol} conf=${m.finalConf}`);
-          }
-        }
-      }
-    } catch(e){ logv('[AI] err '+e.message); }
-
-    // 5) check active exits
-    await checkActiveExits();
-
-    // 6) Learning check outcomes periodically done in LEARN interval
-
-  } catch(e){
-    logv('[MAIN] fatal error ' + e.message);
+  } catch (err) {
+    logv("[MAIN ERROR] " + (err?.message || err));
   }
-
-  logv('[MAIN] cycle complete');
+  logv("[MAIN] cycle complete");
 }
 
-// startup immediate + schedule
-(async ()=>{
-  logv('[SERVER] Spot Master AI full server starting');
-  if(TELEGRAM_TOKEN && TELEGRAM_CHAT_ID) await sendTelegram('<b>[Spot Master AI]</b>\nServer started (full).');
-  // initial run
-  try{ await mainCycle(); } catch(e){ logv('[MAIN] initial err '+e.message); }
-  setInterval(()=>{ mainCycle().catch(e=>logv('[MAIN] loop err '+e.message)); }, SCAN_INTERVAL_MS);
-  // keep-alive ping
-  if(PRIMARY_URL){
-    setInterval(()=>{ fetch(PRIMARY_URL).catch(()=>{}); logv('[KEEPALIVE] ping'); }, KEEP_ALIVE_MIN*60*1000);
+// --- startup & scheduling ---
+(async () => {
+  logv("[SPOT MASTER AI] Starting server (single-file full)");
+  await autoPickBinanceAPI();
+  if (TELEGRAM_TOKEN && TELEGRAM_CHAT_ID) {
+    await sendTelegram("<b>[SPOT MASTER AI]</b>\nServer Started ✅");
   }
-})();
+})().catch(e => logv("[INIT] " + e.message));
+
+// run immediate then schedule
+mainLoop().catch(e => logv("[MAIN] immediate err " + e.message));
+setInterval(mainLoop, SCAN_INTERVAL_MS);
+
+// run a quick rotate-check periodically (in case selected mirror gets blocked)
+setInterval(async () => {
+  try {
+    await safeFetchJSON(`/api/v3/ticker/24hr`, "BINANCE 24h", 1, 6000);
+  } catch (e) {
+    logv("[HEALTH] heartbeat failed, rotating API");
+    rotateBinanceAPI();
+  }
+}, 5 * 60 * 1000);
+
+// KEEP-ALIVE ping to PRIMARY_URL if provided
+if (PRIMARY_URL) {
+  setInterval(() => {
+    try {
+      fetch(PRIMARY_URL);
+      logv("[KEEPALIVE] ping sent to PRIMARY_URL");
+    } catch (e) { /* no-op */ }
+  }, KEEP_ALIVE_INTERVAL_MIN * 60 * 1000);
+}
+
+// expose minimal HTTP healthcheck (optional)
+import express from "express";
+const app = express();
+app.get("/", (req, res) => res.send("Spot Master AI: OK"));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => logv(`HTTP server listening ${PORT}`));
