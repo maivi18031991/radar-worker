@@ -11,30 +11,10 @@ const fetch = (global.fetch || fetchNode);
 import fetchNode from "node-fetch";
 const fetch = (global.fetch || fetchNode);
 
-async function autoPickBinanceAPI() {
-  const mirrors = [
-    "https://api-gcp.binance.com",
-    "https://api1.binance.com",
-    "https://api3.binance.com",
-    "https://api4.binance.com"
-  ];
-  for (const url of mirrors) {
-    try {
-      const res = await fetch(`${url}/api/v3/time`, { timeout: 4000 });
-      if (res.ok) {
-        console.log(`[PREBREAKOUT] ✅ Selected working Binance API: ${url}`);
-        return url;
-      }
-    } catch (e) {
-      console.log(`[PREBREAKOUT] Mirror failed: ${url} (${e.message})`);
-    }
-  }
-  console.log("[PREBREAKOUT] ⚠️ No mirror passed, fallback to api-gcp");
-  return mirrors[0];
-}
-
-// Tự động chọn API nhanh nhất (chạy 1 lần lúc load)
-const BINANCE_API = await autoPickBinanceAPI();
+const BINANCE_API =
+  process.env.BINANCE_API ||
+  "https://data-api.binance.vision"; // ✅ CDN proxy chính thức của Binance
+console.log("[PREBREAKOUT] ✅ Using Binance API:", BINANCE_API);
 
 // ---------- THAM SỐ CẤU HÌNH CHUNG ----------
 const MIN_VOL24H = 5_000_000;       // lọc volume nhỏ
