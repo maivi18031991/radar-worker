@@ -1,177 +1,206 @@
-// server_final.mjs
-// Consolidated server: adaptive scan + quickLearn + deepLearn + rotation pre-breakout integration
-// Paste into repo root as server_final.mjs
-// Node >=16 recommended. Install: npm i node-fetch express
+// server.mjs
+// Combined server final (based on server v4 + v5 + prebreakout module)
+// NOTE: paste whole file over your existing server.mjs
 
-import fetchNode from "node-fetch";
-import fs from "fs/promises";
+import fetch from "node-fetch";
+import fs from "fs";
 import path from "path";
 import https from "https";
 import express from "express";
 
-const fetch = (global.fetch || fetchNode);
+// main modules from repo (must exist)
+import * as learningEngine from "./learning_engine.js";
+import { rotationFlowScan } from "./rotation_flow_live.js";
+import { scanRotationFlow } from "./modules/rotation_prebreakout.js";
+import * as smartLayer from "./smart_layer.js"; // optional utilities
 
-// Try to import existing learning engine and rotation module; if not found, provide safe fallback:
-let learningEngine;
-try {
-  learningEngine = await import("./learning_engine.js");
-} catch (e) {
-  console.log("[SERVER] learning_engine.js not found, using fallback stub.");
-  learningEngine = {
-    async quickLearn48h() { console.log("[LEARNING_STUB] quickLearn48h"); return 0; },
-    async deepLearn7d() { console.log("[LEARNING_STUB] deepLearn7d"); return 0; },
-    async computeAdjustments() { return {}; }
-  };
-}
+// ---- CONFIG (env overrides) ----
+const SCAN_INTERVAL_SEC = Number(process.env.SCAN_INTERVAL_SEC || 60); // base 60s
+const AUTO_LEARN_48H_MS = Number(process.env.AUTO_LEARN_48H_MS || 48 * 3600 * 1000);
+const AUTO_LEARN_7D_MS = Number(process.env.AUTO_LEARN_7D_MS || 7 * 24 * 3600 * 1000);
+const ROTATION_SCAN_MS = Number(process.env.ROTATION_SCAN_MS || 6 * 3600 * 1000); // 6h default
+const QUICK_LEARN_START_DELAY_MS = Number(process.env.QUICK_LEARN_START_DELAY_MS || 5000);
 
-let rotationModule;
-try {
-  rotationModule = await import("./modules/rotation_prebreakout.js");
-} catch (e) {
-  console.log("[SERVER] rotation_prebreakout.js not found, using internal simple wrapper.");
-  // fallback wrapper that returns empty results
-  rotationModule = {
-    async scanRotationFlow() { console.log("[ROTATION_STUB] no module, returning []"); return []; }
-  };
-}
-
-// ---------- CONFIG ----------
 const PORT = process.env.PORT || 3000;
-const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-const AUTO_LEARN_48H_MS = (process.env.AUTO_LEARN_48H_MS ? Number(process.env.AUTO_LEARN_48H_MS) : 48 * 3600 * 1000);
-const AUTO_LEARN_7D_MS = (process.env.AUTO_LEARN_7D_MS ? Number(process.env.AUTO_LEARN_7D_MS) : 7 * 24 * 3600 * 1000);
-const ROTATION_INTERVAL_MS = (process.env.ROTATION_INTERVAL_MS ? Number(process.env.ROTATION_INTERVAL_MS) : 6 * 3600 * 1000);
-const DATA_DIR = path.join(process.cwd(), "data");
-const HYPER_FILE = path.join(DATA_DIR, "hyper_spikes.json");
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || process.env.BOT_TOKEN || "";
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || process.env.BOT_CHAT_ID || "";
+const PRIMARY_URL = process.env.PRIMARY_URL || ""; // keepalive target
 
-// ---------- util ----------
-async function ensureDataDir(){ try{ await fs.mkdir(DATA_DIR, {recursive:true}); }catch(e){} }
-async function saveJSON(file, obj){ await ensureDataDir(); await fs.writeFile(file, JSON.stringify(obj, null, 2), "utf8"); }
-async function readJSON(file, def=[]){ try{ const txt = await fs.readFile(file,"utf8"); return JSON.parse(txt||"null") || def; } catch(e){ return def; } }
+// small logger helpers
+function logv(...args) { console.log(new Date().toLocaleString(), ...args); }
+function logError(...args) { console.error(new Date().toLocaleString(), ...args); }
 
-// safe send Telegram (supports HTML formatting)
-async function sendTelegram(text) {
+// ---- sendTelegram: safe wrapper ----
+async function sendTelegram(text, html = false) {
   if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
-    console.log("[TELE] skip sendTelegram (token/chat missing)");
-    return false;
+    logv("[TELEGRAM] token or chat id missing - skip send");
+    return;
   }
-  const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
-  const body = { chat_id: TELEGRAM_CHAT_ID, text, parse_mode: "HTML", disable_web_page_preview: true };
   try {
-    const res = await fetch(url, { method: "POST", headers: { "Content-Type":"application/json" }, body: JSON.stringify(body) });
-    const data = await res.json();
-    if (!data.ok) throw new Error(data.description || "tg error");
-    return true;
+    const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
+    const payload = {
+      chat_id: TELEGRAM_CHAT_ID,
+      text: text,
+      parse_mode: html ? "HTML" : undefined,
+      disable_web_page_preview: true,
+    };
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      timeout: 10000
+    });
+    const j = await res.json();
+    if (!j.ok) logv("[TELEGRAM] send fail:", j);
+    else logv("[TELEGRAM] sent ok");
+    return j;
   } catch (e) {
-    console.error("[TELE] send error:", e.message || e);
-    return false;
+    logError("[TELEGRAM] error", e?.message || e);
   }
 }
 
-// expose global sendTelegram so modules can call it
-global.sendTelegram = sendTelegram;
-
-// ---------- High-level scheduled tasks ----------
-
-// Quick learn (manual + auto)
-async function doQuickLearn48h() {
-  try {
-    console.log("[QUICKLEARN] start");
-    const r = await learningEngine.quickLearn48h?.();
-    console.log("[QUICKLEARN] done", r);
-    return r;
-  } catch (e) { console.error("[QUICKLEARN] error", e?.message || e); return null; }
-}
-
-// Deep learn 7d
-async function doDeepLearn7d() {
-  try {
-    console.log("[DEEPLEARN] start");
-    const r = await learningEngine.deepLearn7d?.();
-    console.log("[DEEPLEARN] done", r);
-    return r;
-  } catch (e) { console.error("[DEEPLEARN] err", e?.message || e); return null; }
-}
-
-// Rotation scanner (pre-breakout)
-async function doRotationScan() {
-  try {
-    console.log("[ROTATION] start scanRotationFlow");
-    const out = await rotationModule.scanRotationFlow();
-    // rotationModule may auto-send telegrams; we also can post a summary
-    if (Array.isArray(out) && out.length) {
-      const top = out.slice(0,5).map(r => `${r.symbol} ${r.Conf}%`).join(" | ");
-      console.log(`[ROTATION] top -> ${top}`);
-    } else {
-      console.log("[ROTATION] no results");
-    }
-    return out;
-  } catch(e) {
-    console.error("[ROTATION] err", e?.message || e);
-    return [];
-  }
-}
-
-// Adaptive learning loop integration (periodic auto-learning)
-async function autoLearningLoop() {
-  try {
-    // run deep learning every AUTO_LEARN_7D_MS, quick learn every AUTO_LEARN_48H_MS
-    // but here we call quick + deep when scheduled externally by setInterval below.
-    console.log("[AUTO_LEARN] heartbeat");
-  } catch(e) {
-    console.error("[AUTO_LEARN] err", e?.message || e);
-  }
-}
-
-// ---------- Express API (keepalive + debug) ----------
+// ---- Keep minimal http server for Render / healthchecks ----
 const app = express();
-app.use(express.json());
+app.get("/", (req, res) => res.send("SPOT MASTER AI running"));
+app.get("/actives", (req, res) => res.json({ ok: true, when: new Date().toISOString() }));
+app.listen(PORT, () => logv(`Server listening on ${PORT}`));
 
-app.get("/", (req,res) => res.send("SPOT MASTER AI - server_final active"));
-app.get("/health", (req,res) => res.json({ ok:true, ts: Date.now() }));
-app.get("/rotation", async (req,res) => {
-  const out = await doRotationScan();
-  res.json({ results: out });
-});
-app.get("/learn/quick", async (req,res) => {
-  const out = await doQuickLearn48h();
-  res.json({ ok:true, result: out });
-});
-app.get("/learn/deep", async (req,res) => {
-  const out = await doDeepLearn7d();
-  res.json({ ok:true, result: out });
-});
-app.get("/hyper_spikes", async (req,res) => {
-  const arr = await readJSON(HYPER_FILE, []);
-  res.json(arr);
-});
+// ping PRIMARY_URL if configured (keepalive)
+if (PRIMARY_URL) {
+  setInterval(() => {
+    try { https.get(PRIMARY_URL); } catch(e) { logError("Primary ping error", e?.message); }
+  }, 5 * 60 * 1000).unref();
+}
 
-app.listen(PORT, ()=>console.log(`[SERVER] listening ${PORT}`));
+// ---- Scheduling & integration ----
 
-// ---------- Startup actions ----------
-// quick startup notification
-(async ()=>{
-  console.log("[SERVER] startup");
-  await sendTelegram?.("<b>[SPOT MASTER AI]</b>\nStarted. Adaptive scan active.");
+// 1) Quick "fast" learn - run manually after startup and also scheduled by learning engine itself
+try {
+  setTimeout(async () => {
+    try {
+      if (typeof learningEngine.quickLearn48h === "function") {
+        await learningEngine.quickLearn48h();
+        logv("[FAST-LEARN] QuickLearn48h manually started.");
+      } else {
+        logv("[FAST-LEARN] quickLearn48h() not found in learningEngine");
+      }
+    } catch (err) {
+      logError("[FAST-LEARN] Error in quickLearn48h:", err?.message || err);
+    }
+  }, QUICK_LEARN_START_DELAY_MS);
+} catch (e) {
+  logError("[FAST-LEARN] schedule error", e?.message || e);
+}
+
+// 2) Auto-learn intervals (48h and 7d) - rely on learningEngine exports
+if (typeof learningEngine.quickLearn48h === "function") {
+  setInterval(async () => {
+    try {
+      await learningEngine.quickLearn48h();
+      logv("[AUTO] quickLearn48h scheduled run complete");
+    } catch (e) { logError("[AUTO] quickLearn48h error", e?.message || e); }
+  }, AUTO_LEARN_48H_MS);
+} else {
+  logv("[AUTO] quickLearn48h not present - skipping scheduled 48h");
+}
+
+if (typeof learningEngine.deepLearn7d === "function") {
+  setInterval(async () => {
+    try {
+      await learningEngine.deepLearn7d();
+      logv("[AUTO] deepLearn7d scheduled run complete");
+    } catch (e) { logError("[AUTO] deepLearn7d error", e?.message || e); }
+  }, AUTO_LEARN_7D_MS);
+} else {
+  logv("[AUTO] deepLearn7d not present - skipping scheduled 7d");
+}
+
+// 3) Integration: Auto-learning loop (checks outcomes -> compute adjustments -> apply)
+if (typeof learningEngine.checkOutcomesForPending === "function" && typeof learningEngine.computeAdjustments === "function" && typeof learningEngine.applyAdjustments === "function") {
+  setInterval(async () => {
+    try {
+      const checked = await learningEngine.checkOutcomesForPending();
+      if (checked > 0) {
+        const adj = await learningEngine.computeAdjustments();
+        if (adj) {
+          logv(`[LEARNING] ${checked} signals processed, adjustments computed`);
+        } else {
+          logv(`[LEARNING] ${checked} signals processed, no adjustments required`);
+        }
+      } else {
+        logv(`[LEARNING] no new signals checked`);
+      }
+    } catch (err) {
+      logError("[LEARNING LOOP ERROR]", err?.message || err);
+    }
+  }, 6 * 3600 * 1000); // every 6 hours
+} else {
+  logv("[LEARNING LOOP] learning engine missing some functions - skipping auto-learning loop");
+}
+
+// 4) Rotation Flow / Pre-breakout scanner (new module) - scans whole exchange every ROTATION_SCAN_MS
+if (typeof scanRotationFlow === "function") {
+  setInterval(async () => {
+    try {
+      logv("[ROTATION] Running scanRotationFlow()");
+      await scanRotationFlow({ sendTelegram }); // pass helper to module if it accepts
+      logv("[ROTATION] scanRotationFlow complete");
+    } catch (err) {
+      logError("[ROTATION] scanRotationFlow error", err?.message || err);
+    }
+  }, ROTATION_SCAN_MS);
+
+  // run an initial one at startup (non-blocking)
+  (async () => {
+    try {
+      await scanRotationFlow({ sendTelegram });
+      logv("[ROTATION] initial scanRotationFlow done");
+    } catch (e) { logError("[ROTATION] initial error", e?.message || e); }
+  })();
+} else {
+  logv("[ROTATION] scanRotationFlow() not found - skipping rotation pre-breakout");
+}
+
+// 5) rotation_flow_live (if exists) - parallel scanner (e.g. live rotation flow)
+if (typeof rotationFlowScan === "function") {
+  setInterval(async () => {
+    try {
+      logv("[ROT-LIVE] Running rotationFlowScan()");
+      await rotationFlowScan({ sendTelegram });
+      logv("[ROT-LIVE] rotationFlowScan complete");
+    } catch (err) {
+      logError("[ROT-LIVE] rotationFlowScan error", err?.message || err);
+    }
+  }, ROTATION_SCAN_MS);
+} else {
+  logv("[ROT-LIVE] rotationFlowScan not found - skipping rotation_flow_live");
+}
+
+// 6) Adaptive scanning / main engine (if you have adaptiveScan or main scan function inside learningEngine)
+if (typeof learningEngine.adaptiveScan === "function") {
+  (async () => {
+    try {
+      await learningEngine.adaptiveScan();
+      logv("[ADAPTIVE] initial adaptiveScan() done");
+    } catch (e) { logError("[ADAPTIVE] initial adaptiveScan error", e?.message || e); }
+  })();
+} else {
+  logv("[ADAPTIVE] adaptiveScan() not present in learningEngine - skip initial adaptive run");
+}
+
+// ---- Quick startup Telegram notification ----
+(async () => {
+  try {
+    logv("SPOT MASTER AI starting up...");
+    if (TELEGRAM_TOKEN && TELEGRAM_CHAT_ID) {
+      await sendTelegram(`<b>[SPOT MASTER AI]</b>\nStarted. Adaptive scan active.`, true);
+    }
+  } catch (e) {
+    logError("startup notify error", e?.message || e);
+  }
 })();
 
-// initial runs and scheduling
-// manual quick start after boot (small delay to let imports settle)
-setTimeout(() => {
-  doQuickLearn48h().catch(()=>{});
-}, 5000);
-
-// schedule periodic tasks
-setInterval(() => { doQuickLearn48h().catch(()=>{}); }, AUTO_LEARN_48H_MS); // default 48h
-setInterval(() => { doDeepLearn7d().catch(()=>{}); }, AUTO_LEARN_7D_MS);     // default 7d
-setInterval(() => { doRotationScan().catch(()=>{}); }, ROTATION_INTERVAL_MS); // default 6h
-
-// keepalive ping for PRIMARY_URL if set (Render-style)
-if (process.env.PRIMARY_URL) {
-  setInterval(async ()=>{
-    try { await fetch(process.env.PRIMARY_URL); } catch(e){}
-  }, 5 * 60 * 1000);
-}
-
-export default { doQuickLearn48h, doDeepLearn7d, doRotationScan };
+// export for testing if needed
+export default {
+  sendTelegram,
+};
