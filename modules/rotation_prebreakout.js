@@ -145,8 +145,50 @@ async function writeHyperSpikes(arr) {
 }
 
 // ---------- Binance Data Fetchers ----------
+// ---------- Binance Data Fetchers (Smart Retry + Mirror Rotation) ----------
 async function get24hTicker() {
-  return await safeFetch(`${currentApi()}/api/v3/ticker/24hr`, "24h");
+  const MAX_ATTEMPTS = MIRRORS_DEFAULT.length;
+  let attempt = 0;
+
+  while (attempt < MAX_ATTEMPTS) {
+    const base = currentApi();
+    const url = `${base}/api/v3/ticker/24hr`;
+    console.log(`[PREBREAKOUT] Fetching 24h ticker from ${base} (try ${attempt + 1}/${MAX_ATTEMPTS})`);
+
+    try {
+      const resp = await fetch(url, {
+        headers: { "User-Agent": "SpotMaster-RadarBot" },
+        timeout: 8000
+      });
+
+      if (resp.ok) {
+        const data = await resp.json();
+        console.log(`[PREBREAKOUT] ✅ 24h ticker loaded from ${base}`);
+        return data;
+      }
+
+      console.warn(`[PREBREAKOUT] ⚠️ ${base} returned ${resp.status}`);
+
+      // Nếu bị chặn hoặc quá tải → chuyển mirror
+      if (resp.status === 451 || resp.status === 403 || resp.status === 429) {
+        rotateApi();
+        await new Promise(r => setTimeout(r, 1500));
+      } else {
+        // Nếu lỗi khác thì thử lại nhanh hơn
+        await new Promise(r => setTimeout(r, 500));
+      }
+
+    } catch (err) {
+      console.error(`[PREBREAKOUT] ❌ Fetch failed from ${base}:`, err.message);
+      rotateApi();
+      await new Promise(r => setTimeout(r, 2000));
+    }
+
+    attempt++;
+  }
+
+  console.error(`[PREBREAKOUT] ❌ All Binance mirrors failed after ${MAX_ATTEMPTS} attempts.`);
+  return null;
 }
 async function getKlines(symbol, interval = "1h", limit = KLINES_LIMIT) {
   const cached = await getCached(symbol, interval);
