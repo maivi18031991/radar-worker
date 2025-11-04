@@ -60,3 +60,30 @@ export async function scanDailyPumpSync() {
   console.log(`[DAILY PUMP] Done scanning. Hits=${hits.length}`);
   return hits;
 }
+import fetch from "node-fetch";
+
+export async function pushSignal(tag, payload, conf) {
+  try {
+    const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
+    const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+    if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) return;
+
+    let msg = `${tag}\n`;
+    if (payload.symbol) msg += `Symbol: <b>${payload.symbol}</b>\n`;
+    if (payload.conf) msg += `Conf: ${Math.round(payload.conf)}%\n`;
+    if (payload.price) msg += `Price: ${payload.price}\n`;
+    msg += `Time: ${new Date().toLocaleString("vi-VN")}`;
+
+    await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: TELEGRAM_CHAT_ID,
+        text: msg,
+        parse_mode: "HTML"
+      })
+    });
+  } catch (err) {
+    console.error("[pushSignal ERROR]", err.message);
+  }
+}
