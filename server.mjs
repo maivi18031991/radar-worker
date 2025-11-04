@@ -17,14 +17,17 @@ import fetchNode from "node-fetch"; // keep for Node envs
 const fetch = (global.fetch || fetchNode);
 
 // ---------- CONFIG ----------
+// === Full mirror list (v3.8 anti-451) ===
 const MIRRORS_DEFAULT = [
-  "https://api-gcp.binance.com",
+  "https://api.binance.me",             // global mirror (preferred)
+  "https://api1.binance.me",
+  "https://api3.binance.me",
+  "https://api4.binance.me",
   "https://api1.binance.com",
-  "https://api2.binance.com",
   "https://api3.binance.com",
   "https://api4.binance.com",
-  "https://api.binance.me",
-  "https://api.binance.com"
+  "https://api.binance.us",             // ✅ bypass 451 (US mirror)
+  "https://data-api.binance.vision"     // ✅ open data proxy
 ];
 
 const BINANCE_MIRRORS = (process.env.BINANCE_MIRRORS && process.env.BINANCE_MIRRORS.split(",")) || MIRRORS_DEFAULT;
@@ -109,15 +112,31 @@ async function safeFetchJSON(urlPath, label = "BINANCE", retries = 2, timeoutMs 
       const res = await fetch(url, { headers: { "User-Agent": "SpotMasterAI/3.6", "Accept": "application/json" }, timeout: timeoutMs });
       if (!res) throw new Error("No response");
       if (!res.ok) {
-        const status = res.status;
-        logv(`[${label}] fetch ${url} failed (${status})`);
-        // rotate on client-block statuses
-        if ([429, 451, 403, 502, 503, 504].includes(status)) {
-          base = rotateBinanceAPI();
-          // try again with new base
-          await new Promise(r => setTimeout(r, 300 * (attempt + 1)));
-          continue;
+  const status = res.status;
+  logv(`[${label}] ${status} ${url}`);
+
+  if ([429, 451, 403, 502, 503, 504].includes(status)) {
+    logv(`[API] Detected blocked (${status}) → rotating endpoint...`);
+    rotateBinanceAPI();
+
+    // ✅ Nếu bị chặn 451 thì thử fallback qua vision
+    if (status === 451) {
+      try {
+        const alt = url.replace(base, "https://data-api.binance.vision");
+        const altRes = await fetch(alt, { headers: { "User-Agent": "SpotMasterAI/3.8" } });
+        if (altRes.ok) {
+          logv(`[API] ✅ fallback via vision API`);
+          return await altRes.json();
         }
+      } catch (e2) {
+        logv(`[API] vision fallback failed: ${e2.message}`);
+      }
+    }
+  }
+
+  await new Promise(r => setTimeout(r, 300 * (attempt + 1)));
+  continue;
+}
         // otherwise try again after backoff
         await new Promise(r => setTimeout(r, 300 * (attempt + 1)));
         continue;
