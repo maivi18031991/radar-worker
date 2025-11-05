@@ -545,6 +545,24 @@ async function scanEarlyPump() {
         };
 
         results.push(msg);
+        // 🚨 Nếu tín hiệu đạt độ tin cậy cao thì gửi ngay cảnh báo
+if (conf >= 70) {
+  const entryLow = (chg - 1).toFixed(2);
+  const entryHigh = (chg + 1).toFixed(2);
+  const entryZone = `${entryLow}% → ${entryHigh}%`;
+
+  const alertMsg = `
+<b>[EARLY ALERT]</b> ${t.symbol}
+Δ24h: <b>${chg.toFixed(2)}%</b> | Conf: ${conf.toFixed(0)}%
+Vol: ${volNow.toLocaleString()}
+Entry zone: ${entryZone}
+Note: Price entering smart accumulation band 🧠
+Time: ${new Date().toLocaleString("en-GB", { timeZone: "Asia/Ho_Chi_Minh" })}
+`;
+
+  await sendTelegram(alertMsg);
+  logv(`[ALERT] Sent immediate ${t.symbol} | Conf=${conf.toFixed(1)}`);
+}
         logv(`[EARLY] ${t.symbol} | Conf ${conf.toFixed(1)}% | vol x${volRatio.toFixed(2)} | RSI ${RSI_H1.toFixed(1)} | BB ${bb.width.toFixed(3)}`);
       } catch (e) {
         logv(`[EARLY] error ${t.symbol}: ${e.message}`);
