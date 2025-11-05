@@ -748,9 +748,48 @@ async function mainLoop() {
   } catch (err) {
     logv("[MAIN ERROR] " + (err?.message || err));
   }
+  // ✅ Auto push top signals each round
+await pushTopSignals(preList, "[PRE]");
+await pushTopSignals(earlyList, "[EARLY]");
   logv("[MAIN] cycle complete");
 }
+// ------------------ Auto Prioritizer: chọn tín hiệu mạnh nhất ------------------
+async function pushTopSignals(list, tag = "[AUTO]") {
+  try {
+    if (!Array.isArray(list) || !list.length) return;
+    // Ưu tiên theo Conf, sau đó theo volume
+    const sorted = [...list].sort((a, b) => {
+      const c1 = (b.Conf || b.conf || 0) - (a.Conf || a.conf || 0);
+      if (c1 !== 0) return c1;
+      return (b.quoteVolume || 0) - (a.quoteVolume || 0);
+    });
 
+    // Lấy top 3 coin mạnh nhất (Conf >= 70)
+    const top = sorted.filter(x => (x.Conf || x.conf || 0) >= 70).slice(0, 3);
+    if (!top.length) {
+      logv("[AUTO] No high-confidence signals to push");
+      return;
+    }
+
+    logv(`[AUTO] pushing top ${top.length} high-Conf signals`);
+
+    for (const coin of top) {
+      const conf = coin.Conf || coin.conf || 70;
+      const sym = coin.symbol?.replace("USDT", "");
+      const msg = `
+<b>${tag}</b> ${sym}USDT
+Δ24h: <b>${(coin.priceChangePercent || 0).toFixed(2)}%</b> | Conf: ${conf}%
+Vol: ${(coin.quoteVolume || 0).toLocaleString()}
+Note: High-Confidence Candidate
+Time: ${new Date().toLocaleString("en-GB", { timeZone: "Asia/Ho_Chi_Minh" })}
+`;
+      await sendTelegram(msg);
+      logv(`[AUTO] pushed ${sym} | Conf ${conf}%`);
+    }
+  } catch (e) {
+    logv("[AUTO] error " + e.message);
+  }
+}
 // --- startup & scheduling ---
 (async () => {
   logv("[SPOT MASTER AI] Starting server (single-file full)");
