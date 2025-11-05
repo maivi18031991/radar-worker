@@ -622,26 +622,20 @@ if (PRIMARY_URL) {
   }, KEEP_ALIVE_INTERVAL_MIN * 60 * 1000);
 }
 
-// expose minimal HTTP healthcheck (optional)
-// --- Minimal HTTP healthcheck for Render ---
+// === RENDER FREE FIX (final keep-alive) ===
+import http from "http";
 
 const PORT = process.env.PORT || 10000;
 const server = http.createServer((req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain" });
-  res.end("✅ Radar Worker is running fine.\n");
+  res.end("✅ Spot Master AI (Render Free) is running fine.\n");
 });
 
 server.listen(PORT, () => {
-  console.log(`[RENDER FIX] Listening on port ${PORT} (Render check OK)`);
+  console.log(`[RENDER FIX] Web listener active on port ${PORT}`);
 });
 
-// === KEEP PROCESS ALIVE FOR RENDER ===
+// KEEP PROCESS ALIVE (ping log mỗi 10 phút)
 setInterval(() => {
   console.log(`[KEEPALIVE] Server still running at ${new Date().toLocaleTimeString()}`);
-}, 10 * 60 * 1000); // 10 phút ping 1 lần để không bị exit
-process.stdin.resume(); // 🔒 giữ process luôn mở
-
-// === KEEP BOT ALIVE (loop background tasks) ===
-setInterval(() => {
-  console.log("[KEEPALIVE] worker ping", new Date().toLocaleTimeString());
-}, 5 * 60 * 1000); // ping log mỗi 5 
+}, 10 * 60 * 1000);
