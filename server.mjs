@@ -242,6 +242,9 @@ async function sendTelegram(text) {
   const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
   const payload = { chat_id: TELEGRAM_CHAT_ID, text, parse_mode: "HTML", disable_web_page_preview: true };
   try {
+     const testUrl = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/getMe`;
+  const t = await fetch(testUrl);
+  logv(`[TELEGRAM TEST] status ${t.status}`);
     const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
     if (!res.ok) logv(`[TELEGRAM] send failed ${res.status}`);
   } catch (e) {
