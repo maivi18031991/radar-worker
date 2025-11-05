@@ -19,46 +19,102 @@ import fetchNode from "node-fetch";
 const fetch = (global.fetch || fetchNode);
 const LOG_DEBUG = process.env.LOG_DEBUG === "true";
 
-// --- Utility: fetch 24h ticker data from Binance (auto mirror & fallback) ---
+// Robust get24hTickers with mirror rotation, retries and CoinGecko fallback
 async function get24hTickers() {
   const mirrorUrls = [
     "https://api.binance.me/api/v3/ticker/24hr",
     "https://api1.binance.me/api/v3/ticker/24hr",
     "https://api2.binance.me/api/v3/ticker/24hr",
     "https://api3.binance.me/api/v3/ticker/24hr",
-    "https://api-gw.binance.vision/api/v3/ticker/24hr"
+    "https://api-gw.binance.vision/api/v3/ticker/24hr",
+    "https://api.binance.com/api/v3/ticker/24hr" // last fallback
   ];
 
   const headers = {
-    "User-Agent": "Mozilla/5.0 (compatible; SpotMasterAI/1.0; +https://binance.com)",
-    "Accept": "application/json"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) SpotMasterAI/1.0",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.binance.com/"
   };
 
-  let data = [];
-  let lastError = "";
+  const maxRetriesPerMirror = 2;
+  const perRequestTimeoutMs = 10000; // 10s
+  let lastErr = null;
 
-  for (const url of mirrorUrls) {
+  // helper timeout fetch using AbortController
+  async function fetchWithTimeout(url, options = {}, timeoutMs = perRequestTimeoutMs) {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const res = await fetch(url, { headers, timeout: 8000 });
-      if (res.ok) {
-        data = await res.json();
-        logv(`[API] mirror success ✅ (${url}) → ${data.length} tickers`);
-        break;
-      } else {
-        logv(`[API] mirror failed (${url}) ❌ status:${res.status}`);
-        lastError = res.status;
-      }
+      const res = await fetch(url, { ...options, signal: controller.signal });
+      clearTimeout(id);
+      return res;
     } catch (e) {
-      logv(`[API] mirror fetch error (${url}): ${e.message}`);
-      lastError = e.message;
+      clearTimeout(id);
+      throw e;
     }
   }
 
-  if (!data.length) {
-    logv(`[BINANCE] error fetching 24h tickers 🚫 (${lastError})`);
+  for (const url of mirrorUrls) {
+    for (let attempt = 1; attempt <= maxRetriesPerMirror; attempt++) {
+      try {
+        logv(`[API] try mirror ${url} (attempt ${attempt}/${maxRetriesPerMirror})`);
+        const res = await fetchWithTimeout(url, { headers }, perRequestTimeoutMs);
+        if (!res.ok) {
+          logv(`[API] mirror failed (${url}) status:${res.status}`);
+          lastErr = `status:${res.status}`;
+          // 4xx often won't succeed by retrying same mirror; break inner loop on 4xx except 429
+          if (res.status >= 400 && res.status < 500 && res.status !== 429) break;
+          // otherwise retry
+          await new Promise(r => setTimeout(r, 500 * attempt));
+          continue;
+        }
+        const data = await res.json();
+        if (!Array.isArray(data) || data.length === 0) {
+          logv(`[API] mirror ${url} returned no data`);
+          lastErr = "no-data";
+          break;
+        }
+        logv(`[API] mirror success (${url}) → ${data.length} tickers`);
+        return data;
+      } catch (e) {
+        lastErr = e.message || String(e);
+        logv(`[API] mirror fetch error (${url}) attempt ${attempt}: ${lastErr}`);
+        // small backoff
+        await new Promise(r => setTimeout(r, 400 * attempt));
+        // continue attempts
+      }
+    }
   }
 
-  return data;
+  // If all Binance mirrors failed, fallback to CoinGecko markets endpoint (good alternative)
+  try {
+    logv("[API] All Binance mirrors failed, falling back to CoinGecko");
+    // CoinGecko: get top 250 coins by market cap in USD (returns price, volume)
+    const cgUrl = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&per_page=250&page=1&price_change_percentage=24h";
+    const resCg = await fetchWithTimeout(cgUrl, { headers: { "Accept": "application/json" } }, 12000);
+    if (resCg.ok) {
+      const cg = await resCg.json();
+      // map CoinGecko format to Binance-like minimal fields used by rest of code
+      const mapped = cg.map(c => ({
+        symbol: (c.symbol || "").toUpperCase() + "USDT", // approximate symbol
+        lastPrice: c.current_price,
+        quoteVolume: Number(c.total_volume || 0),
+        priceChangePercent: Number(c.price_change_percentage_24h || 0)
+      }));
+      logv(`[API] CoinGecko fallback success → ${mapped.length} entries`);
+      return mapped;
+    } else {
+      logv(`[API] CoinGecko fallback failed status:${resCg.status}`);
+      lastErr = `coinGeckoStatus:${resCg.status}`;
+    }
+  } catch (e) {
+    lastErr = e.message || String(e);
+    logv(`[API] CoinGecko fallback error: ${lastErr}`);
+  }
+
+  logv(`[BINANCE] error fetching 24h tickers 🚫 (${lastErr || "unknown"})`);
+  return [];
 }
 // ---------- CONFIG ----------
 // === Full mirror list (v3.8 anti-451) ===
