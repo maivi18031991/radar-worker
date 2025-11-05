@@ -12,27 +12,42 @@ import fs from "fs/promises";
 import path from "path";
 import { sendTelegram } from "../telegram.js"; // optional
 
-const DATA_DIR = path.join(process.cwd(), "data");
-const CACHE_FILE = path.join(DATA_DIR, "cache_klines.json");
 // === Full mirror list (v3.8 anti-451) ===
 const MIRRORS_DEFAULT = [
-  "https://api.binance.me",             // global mirror (preferred)
+  "https://api.binance.me",
   "https://api1.binance.me",
   "https://api3.binance.me",
   "https://api4.binance.me",
   "https://api1.binance.com",
   "https://api3.binance.com",
   "https://api4.binance.com",
-  "https://api.binance.us",             // ✅ bypass 451 (US mirror)
-  "https://data-api.binance.vision"     // ✅ open data proxy
+  "https://api.binance.us",
+  "https://data-api.binance.vision"
 ];
+
+// ---------- API rotation (stable) ----------
+const BINANCE_MIRRORS =
+  (process.env.BINANCE_MIRRORS && process.env.BINANCE_MIRRORS.split(",")) ||
+  MIRRORS_DEFAULT;
+
 let apiIndex = 0;
-function currentAPI() { return BINANCE_APIS[apiIndex % BINANCE_APIS.length]; }
+function currentAPI() {
+  if (!Array.isArray(BINANCE_MIRRORS) || BINANCE_MIRRORS.length === 0)
+    return MIRRORS_DEFAULT[0];
+  return BINANCE_MIRRORS[apiIndex % BINANCE_MIRRORS.length];
+}
 function rotateAPI() {
-  apiIndex = (apiIndex + 1) % BINANCE_APIS.length;
+  if (!Array.isArray(BINANCE_MIRRORS) || BINANCE_MIRRORS.length === 0) {
+    apiIndex = (apiIndex + 1) % MIRRORS_DEFAULT.length;
+    console.log(`[EARLY] 🔁 Switched to ${MIRRORS_DEFAULT[apiIndex]}`);
+    return;
+  }
+  apiIndex = (apiIndex + 1) % BINANCE_MIRRORS.length;
   console.log(`[EARLY] 🔁 Switched to ${currentAPI()}`);
 }
 
+const DATA_DIR = path.join(process.cwd(), "data");
+const CACHE_FILE = path.join(DATA_DIR, "cache_klines.json");
 const MIN_VOL24H = 2_000_000;
 const MAX_TICKERS = 80;
 const CONF_THRESHOLD = 65;
@@ -61,44 +76,52 @@ async function safeFetch(url, label = "BINANCE", retries = 3) {
   for (let i = 0; i < retries; i++) {
     try {
       const res = await fetch(`${currentAPI()}${url}`, {
-        headers: { "User-Agent": "SpotMasterAI/3.9", "Accept": "application/json" },
-        timeout: 8000
+        headers: {
+          "User-Agent": "SpotMasterAI/3.9",
+          Accept: "application/json",
+        },
+        timeout: 8000,
       });
       if (!res.ok) {
         if (res.status === 403 || res.status === 429) rotateAPI();
-        await new Promise(r => setTimeout(r, 400 * (i + 1)));
+        await new Promise((r) => setTimeout(r, 400 * (i + 1)));
         continue;
       }
       return await res.json();
     } catch (e) {
       console.warn(`[${label}] ${currentAPI()} failed:`, e.message);
       rotateAPI();
-      await new Promise(r => setTimeout(r, 400 * (i + 1)));
+      await new Promise((r) => setTimeout(r, 400 * (i + 1)));
     }
   }
   throw new Error(`[${label}] all API mirrors failed`);
 }
 
 // --- Indicators ---
-function sma(a, n) { return a.slice(-n).reduce((x, y) => x + y, 0) / Math.min(a.length, n); }
+function sma(a, n) {
+  return a.slice(-n).reduce((x, y) => x + y, 0) / Math.min(a.length, n);
+}
 function stddev(a, n) {
   const m = sma(a, n);
   return Math.sqrt(a.slice(-n).reduce((s, v) => s + (v - m) ** 2, 0) / n);
 }
 function bollingerWidth(a, n = 14, mult = 2) {
-  const mb = sma(a, n), sd = stddev(a, n);
+  const mb = sma(a, n),
+    sd = stddev(a, n);
   return (2 * mult * sd) / (mb || 1);
 }
 function rsi(a, n = 14) {
   if (a.length < n + 1) return 50;
-  let g = 0, l = 0;
+  let g = 0,
+    l = 0;
   for (let i = a.length - n; i < a.length; i++) {
     const d = a[i] - a[i - 1];
-    if (d > 0) g += d; else l += -d;
+    if (d > 0) g += d;
+    else l += -d;
   }
   if (l === 0) return 100;
   const rs = g / l;
-  return 100 - (100 / (1 + rs));
+  return 100 - 100 / (1 + rs);
 }
 
 // --- Detect Compression ---
@@ -117,7 +140,9 @@ export async function scanEarlyPump() {
   try {
     const tickers = await safeFetch("/api/v3/ticker/24hr", "TICKERS");
     const top = tickers
-      .filter(t => t.symbol.endsWith("USDT") && Number(t.quoteVolume) > MIN_VOL24H)
+      .filter(
+        (t) => t.symbol.endsWith("USDT") && Number(t.quoteVolume) > MIN_VOL24H
+      )
       .sort((a, b) => b.quoteVolume - a.quoteVolume)
       .slice(0, MAX_TICKERS);
 
@@ -129,13 +154,16 @@ export async function scanEarlyPump() {
         const cached = cache[key];
         let data = cached?.data;
         if (!data || Date.now() - cached.ts > 5 * 60 * 1000) {
-          data = await safeFetch(`/api/v3/klines?symbol=${t.symbol}&interval=1h&limit=100`, t.symbol);
+          data = await safeFetch(
+            `/api/v3/klines?symbol=${t.symbol}&interval=1h&limit=100`,
+            t.symbol
+          );
           cache[key] = { ts: Date.now(), data };
           await saveCache();
         }
 
-        const closes = data.map(k => Number(k[4]));
-        const vols = data.map(k => Number(k[5]));
+        const closes = data.map((k) => Number(k[4]));
+        const vols = data.map((k) => Number(k[5]));
         const RSI_H1 = rsi(closes, 14);
         const BB = detectCompression(closes, vols);
 
@@ -157,7 +185,6 @@ export async function scanEarlyPump() {
 
           candidates.push(result);
 
-          // optional Telegram push (nếu muốn nhận cảnh báo ngay)
           if (process.env.TELEGRAM_CHAT_ID && conf >= 75) {
             await sendTelegram(`
 ⚡ <b>[EARLY PUMP DETECTED]</b>
