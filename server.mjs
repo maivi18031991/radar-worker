@@ -19,14 +19,11 @@ import fetchNode from "node-fetch";
 const fetch = (global.fetch || fetchNode);
 const LOG_DEBUG = process.env.LOG_DEBUG === "true";
 
-// --- Utility: fetch Klines (candlestick data)
 async function getKlines(symbol, interval = "1h", limit = 100) {
   const urls = [
-    `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`,
-    `https://api1.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`,
+    `https://data-api.binance.vision/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`,
     `https://api-gw.binance.vision/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`,
-    // Proxy fallback qua Cloudflare để tránh lỗi 451
-    `https://binance-proxy.mira.workers.dev/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`
+    `https://proxy.cors.sh/https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`
   ];
 
   for (let url of urls) {
@@ -39,18 +36,16 @@ async function getKlines(symbol, interval = "1h", limit = 100) {
           return data;
         }
       } else {
-        logv(`[BINANCE] Kline fetch failed (${url}) status: ${res.status}`);
+        logv(`[BINANCE] Kline failed (${url}) status: ${res.status}`);
       }
     } catch (e) {
-      logv(`[BINANCE] Kline error (${url}): ${e.message}`);
+      logv(`[BINANCE] error (${url}): ${e.message}`);
     }
   }
 
   logv(`[BINANCE] ❌ All mirrors failed fetching klines for ${symbol}`);
   return [];
 }
-
-
 // --- Utility: fetch 24h ticker data
 async function get24hTickers() {
   const urls = [
