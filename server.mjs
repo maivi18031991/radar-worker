@@ -16,8 +16,7 @@ import path from "path";
 import fetchNode from "node-fetch"; // keep for Node envs
 const fetch = (global.fetch || fetchNode);
 // === Import analysis modules ===
-import { scanEarlyPump } from "./modules/early_pump_detector.js";
-import { scanPreBreakout } from "./modules/rotation_prebreakout.js";
+import http from "http";
 // ---------- CONFIG ----------
 // === Full mirror list (v3.8 anti-451) ===
 const MIRRORS_DEFAULT = [
@@ -642,12 +641,4 @@ process.stdin.resume(); // 🔒 giữ process luôn mở
 // === KEEP BOT ALIVE (loop background tasks) ===
 setInterval(() => {
   console.log("[KEEPALIVE] worker ping", new Date().toLocaleTimeString());
-}, 5 * 60 * 1000); // ping log mỗi 5 phút
-
-// === AUTO PING RENDER PRIMARY URL ===
-const PRIMARY_URL = process.env.PRIMARY_URL;
-if (PRIMARY_URL) {
-  setInterval(() => {
-    fetch(PRIMARY_URL).catch(() => {});
-  }, 10 * 60 * 1000); // ping 10 phút/lần
-}
+}, 5 * 60 * 1000); // ping log mỗi 5 
