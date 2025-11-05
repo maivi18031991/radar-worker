@@ -366,106 +366,148 @@ Time: ${new Date().toLocaleString("en-GB", { timeZone: "Asia/Ho_Chi_Minh" })}
     console.error("[pushSignal ERROR]", err.message || err);
   }
 }
-// ------------------ PreBreakout core (rotation) ------------------
-async function get24hTickers() {
-  // returns array
-  const j = await safeFetchJSON(`/api/v3/ticker/24hr`, "BINANCE 24h", 2, 7000);
-  if (!Array.isArray(j)) throw new Error("24hr ticker response not array");
-  return j;
-}
-async function getKlines(symbol, interval = "1h", limit = KLINES_LIMIT) {
-  const q = `/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
-  const j = await safeFetchJSON(q, "BINANCE KLINES", 2, 9000);
-  if (!Array.isArray(j)) throw new Error(`klines not array for ${symbol}`);
-  return j;
-}
-
-async function scanRotationFlow() {
-  try {
-    const all24 = await get24hTickers(); // may throw
-    const usdt = all24.filter(t => t.symbol && t.symbol.endsWith("USDT"))
-      .map(t => ({ symbol: t.symbol, vol24: Number(t.quoteVolume || t.volume || 0), baseVolume: Number(t.volume || 0), priceChangePercent: Number(t.priceChangePercent || 0), quoteVolume: Number(t.quoteVolume || 0) }))
-      .filter(t => t.vol24 >= MIN_VOL24H)
-      .sort((a,b) => b.vol24 - a.vol24)
-      .slice(0, MAX_TICKERS);
-    if (!usdt.length) {
-      logv("[ROTATION] no USDT tickers pass min vol");
-      return [];
-    }
-    if (LOG_DEBUG) logv(`[DEBUG] Scanning ${usdt.length} tickers with minVol ${MIN_VOL24H}`);
-    const results = [];
-    const hyper = await readHyperSpikes();
-    // btc rsi
-    let BTC_RSI = 50;
-    try {
-      const btc1h = await getKlines("BTCUSDT", "1h", 100);
-      BTC_RSI = rsiFromArray(klinesCloseArray(btc1h), 14);
-    } catch (e) {}
-    for (const t of usdt) {
-      try {
-        const k4 = await getKlines(t.symbol, "4h", 100).catch(()=>[]);
-        const k1 = await getKlines(t.symbol, "1h", 100).catch(()=>[]);
-        if (!k4.length || !k1.length) continue;
-        if (LOG_DEBUG) logv(`[DEBUG] Checking ${t.symbol} | 24hVol: ${t.vol24.toFixed(0)} | Δ${t.priceChangePercent}%`);
-        const closes4 = klinesCloseArray(k4);
-        const closes1 = klinesCloseArray(k1);
-        const vols1 = klinesVolumeArray(k1);
-        const RSI_H4 = Number((rsiFromArray(closes4, 14) || 0).toFixed(1));
-        const RSI_H1 = Number((rsiFromArray(closes1, 14) || 0).toFixed(1));
-        const bb = bollingerWidth(closes4, 14, 2);
-        const BBWidth_H4 = Number((bb.width || 0).toFixed(3));
-        const MA20 = Number((sma(closes4, 20) || closes4[closes4.length-1]).toFixed(6));
-        const VolNow = Number(vols1[vols1.length - 1] || 0);
-        const avg24h_base = Number(t.baseVolume || 1) / 24;
-        const VolNowRatio = avg24h_base ? Number((VolNow / avg24h_base).toFixed(2)) : 1;
-        const price = Number(closes1[closes1.length - 1] || 0);
-        const Conf = computeConf({ RSI_H4, RSI_H1, VolNowRatio, BBWidth_H4, BTC_RSI });
-        const compressed = isCompressed({ price, mb: bb.mb, up: bb.up, dn: bb.dn, bbWidth: BBWidth_H4, MA20 });
-        const res = {
-          symbol: t.symbol,
-          price,
-          RSI_H4, RSI_H1,
-          BBWidth_H4,
-          VolNow,
-          VolNowRatio,
-          MA20,
-          Conf,
-          BTC_RSI: Number((BTC_RSI || 0).toFixed(1)),
-          compressed,
-          quoteVolume: t.quoteVolume || 0,
-          priceChangePercent: t.priceChangePercent || 0,
-        };
-        if (Conf >= CONF_THRESHOLD_SEND && compressed) {
-          logv(`[PREBREAKOUT] ${t.symbol} Conf=${Conf}`);
-        }
-        if (Conf >= HYPER_SPIKE_THRESHOLD && compressed) hyper.push({ ...res, ts: Date.now() });
-        results.push(res);
-      } catch (e) {
-        console.log("[ROTATION] err for", t.symbol, e?.message || e);
-      }
-    }
-    if (hyper.length) await writeHyperSpikes(hyper.slice(-500));
-    results.sort((a,b) => b.Conf - a.Conf);
-    logv(`[ROTATION] scanned ${results.length} symbols, top: ${results[0]?.symbol || "none"} ${results[0]?.Conf || 0}%`);
-    return results;
-  } catch (err) {
-    logv("[ROTATION] main error: " + err.message);
-    return [];
-  }
-}
+// ------------------ Smart PreBreakout Detector vFinal ------------------
 async function scanPreBreakout() {
   try {
-    const data = await scanRotationFlow();
-    if (!Array.isArray(data)) return [];
-    const valid = data.filter(x => x.symbol && x.Conf >= 60);
-    logv(`[PREBREAKOUT] xuất ${valid.length} tín hiệu hợp lệ`);
-    return valid;
-  } catch (e) {
-    logv("[PREBREAKOUT] lỗi: " + e.message);
+    logv("[PREBREAKOUT] Starting Smart PreBreakout scan...");
+
+    const all24 = await get24hTickers();
+    const usdt = all24
+      .filter(t => t.symbol && t.symbol.endsWith("USDT"))
+      .map(t => ({
+        symbol: t.symbol,
+        vol24: Number(t.quoteVolume || 0),
+        priceChangePercent: Number(t.priceChangePercent || 0)
+      }))
+      .sort((a, b) => b.vol24 - a.vol24);
+
+    if (!usdt.length) {
+      logv("[PREBREAKOUT] no USDT tickers found");
+      return [];
+    }
+
+    // Lọc top 25% volume
+    const topCut = Math.floor(usdt.length * 0.25);
+    const topVol = usdt.slice(0, topCut);
+
+    // Bộ nhớ chống trùng cảnh báo
+    const alertCache = new Map(); // { symbol: timestamp }
+
+    // RSI của BTC để lọc thị trường
+    const btc4h = await getKlines("BTCUSDT", "4h", 120).catch(() => []);
+    const BTC_RSI = btc4h.length ? rsiFromArray(klinesCloseArray(btc4h), 14) : 50;
+    if (BTC_RSI < 40 || BTC_RSI > 75) {
+      logv(`[PREBREAKOUT] Market unstable (BTC_RSI=${BTC_RSI.toFixed(1)})`);
+      return [];
+    }
+
+    const results = [];
+
+    for (const t of topVol) {
+      try {
+        const k4 = await getKlines(t.symbol, "4h", 120).catch(() => []);
+        const k1 = await getKlines(t.symbol, "1h", 100).catch(() => []);
+        if (!k4.length || !k1.length) continue;
+
+        const closes4 = klinesCloseArray(k4);
+        const closes1 = klinesCloseArray(k1);
+
+        const lastPrice = closes1.at(-1);
+        const ma20 = smaFromArray(closes4, 20);
+        const bb = bollingerWidth(closes4, 20, 2);
+
+        // Vùng nén chuẩn bị bật
+        if (bb.width > 0.08) continue; // bỏ coin band còn rộng
+        if (lastPrice < ma20 * 0.99) continue; // chưa tiệm cận MA20
+
+        // RSI báo hiệu sắp breakout
+        const RSI_H1 = rsiFromArray(closes1, 14);
+        if (RSI_H1 < 48 || RSI_H1 > 75) continue;
+
+        // Tăng nhẹ 24h và vol đang nhích
+        const chg = t.priceChangePercent;
+        if (chg < -4 || chg > 8) continue;
+
+        const vols1 = klinesVolumeArray(k1);
+        const avgVol = vols1.slice(-30, -5).reduce((a, b) => a + b, 0) / 25;
+        const volNow = vols1.at(-1);
+        const volRatio = avgVol ? volNow / avgVol : 1;
+
+        if (volRatio < 1.5) continue; // cần có tín hiệu gom nhẹ
+
+        // Tính độ tin cậy Conf (đơn giản mà chính xác)
+        const conf = Math.min(
+          45 +
+            (volRatio - 1.5) * 15 +
+            (RSI_H1 - 45) * 0.8 +
+            (0.08 - bb.width) * 400,
+          92
+        );
+
+        const msg = {
+          symbol: t.symbol,
+          quoteVolume: t.vol24,
+          priceChangePercent: chg,
+          note: "Smart PreBreakout candidate",
+          conf,
+          RSI_H1,
+          volRatio,
+          bbWidth: bb.width,
+        };
+
+        results.push(msg);
+
+        // 🚨 Gửi cảnh báo ngay khi đạt Conf >= 72
+        if (conf >= 72) {
+          const now = Date.now();
+          const lastAlert = alertCache.get(t.symbol) || 0;
+          const timeDiff = (now - lastAlert) / 1000 / 60;
+
+          if (timeDiff > 10) {
+            const entryLow = (chg - 0.8).toFixed(2);
+            const entryHigh = (chg + 1.2).toFixed(2);
+            const entryZone = `${entryLow}% → ${entryHigh}%`;
+
+            const alertMsg = `
+<b>[PREBREAKOUT ALERT]</b> ${t.symbol}
+Δ24h: <b>${chg.toFixed(2)}%</b> | Conf: ${conf.toFixed(0)}%
+Vol x${volRatio.toFixed(2)} | BB ${bb.width.toFixed(3)}
+Entry zone: ${entryZone}
+Note: Price testing upper band — watch for real breakout ⚡
+Time: ${new Date().toLocaleString("en-GB", { timeZone: "Asia/Ho_Chi_Minh" })}
+`;
+
+            await sendTelegram(alertMsg);
+            alertCache.set(t.symbol, now);
+            logv(`[ALERT] Sent breakout alert ${t.symbol} | Conf=${conf.toFixed(1)}`);
+          } else {
+            logv(`[ALERT] Skipped duplicate ${t.symbol}, last alert ${timeDiff.toFixed(1)}m ago`);
+          }
+        }
+
+        // Log chi tiết
+        logv(`[PRE] ${t.symbol} | Conf ${conf.toFixed(1)}% | RSI ${RSI_H1.toFixed(1)} | BB ${bb.width.toFixed(3)} | vol x${volRatio.toFixed(2)}`);
+      } catch (e) {
+        logv(`[PREBREAKOUT] error ${t.symbol}: ${e.message}`);
+      }
+    }
+
+    results.sort((a, b) => b.conf - a.conf);
+
+    if (results.length) {
+      const top = results[0];
+      await pushSignal("[PRE]", top, top.conf);
+      logv(`[PREBREAKOUT] pushed ${top.symbol} Conf=${top.conf}`);
+    } else {
+      logv("[PREBREAKOUT] xuất 0 tín hiệu hợp lệ");
+    }
+
+    return results;
+  } catch (err) {
+    logv("[PREBREAKOUT] main error: " + err.message);
     return [];
   }
 }
-
 // ------------------ Smart Early Pump Detector vFinal ------------------
 async function scanEarlyPump() {
   try {
