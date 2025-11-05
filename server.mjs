@@ -631,19 +631,7 @@ const server = http.createServer((req, res) => {
 server.listen(PORT, () => {
   console.log(`[RENDER FIX] Listening on port ${PORT} (Render check OK)`);
 });
-// === FAKE WEB LISTENER FOR RENDER FREE PLAN ===
-import http from "http";
 
-const PORT = process.env.PORT || 10000;
-const server = http.createServer((req, res) => {
-  res.writeHead(200, { "Content-Type": "text/plain" });
-  res.end("✅ Radar Worker running (Render Free Mode)\n");
-});
-
-// listen so Render sees an open port
-server.listen(PORT, () => {
-  console.log(`[RENDER FIX] Web listener active on port ${PORT}`);
-});
 // === KEEP PROCESS ALIVE FOR RENDER ===
 setInterval(() => {
   console.log(`[KEEPALIVE] Server still running at ${new Date().toLocaleTimeString()}`);
