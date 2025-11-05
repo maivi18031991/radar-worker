@@ -14,9 +14,23 @@ import fs from "fs";
 import fsPromises from "fs/promises";
 import path from "path";
 import http from "http";
-import fetchNode from "node-fetch"; // keep for Node envs
+import fetchNode from "node-fetch";
+
 const fetch = (global.fetch || fetchNode);
 const LOG_DEBUG = process.env.LOG_DEBUG === "true";
+
+// --- Utility: fetch 24h ticker data from Binance ---
+async function get24hTickers() {
+  try {
+    const res = await fetch("https://api.binance.com/api/v3/ticker/24hr");
+    if (!res.ok) throw new Error(`Failed to fetch tickers: ${res.status}`);
+    const data = await res.json();
+    return data;
+  } catch (e) {
+    logv("[BINANCE] error fetching 24h tickers: " + e.message);
+    return [];
+  }
+}
 // ---------- CONFIG ----------
 // === Full mirror list (v3.8 anti-451) ===
 const MIRRORS_DEFAULT = [
