@@ -106,7 +106,7 @@ function rotateBinanceAPI() {
 
 // === Safe fetch with intelligent rotate + retry ===
 async function safeFetchJSON(urlPath, label = "API", retries = 3) {
-  let base = SELECTED_BINANCE || (await autoSelectBinance());
+  let base = SELECTED_BINANCE || (await autoPickBinanceAPI());
   const headers = { "User-Agent": "RadarWorker/1.0" };
 
   for (let attempt = 0; attempt <= retries; attempt++) {
