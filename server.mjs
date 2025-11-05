@@ -441,44 +441,108 @@ async function scanPreBreakout() {
   }
 }
 
-// ------------------ Early Pump Detector ------------------
+// ------------------ Smart Early Pump Detector ------------------
 async function scanEarlyPump() {
   try {
+    logv("[EARLY] Starting Smart Early Pump scan...");
     const all24 = await get24hTickers();
-    if (LOG_DEBUG) logv(`[DEBUG] Starting Early Pump scan...`);
-    const usdt = all24.filter(t => t.symbol && t.symbol.endsWith("USDT"))
-      .map(t => ({ symbol: t.symbol, vol24: Number(t.quoteVolume || t.volume || 0), baseVolume: Number(t.volume || 0), priceChangePercent: Number(t.priceChangePercent || 0), quoteVolume: Number(t.quoteVolume || 0) }))
-      .filter(t => t.vol24 >= 200_000) // lower threshold so early can see smaller but real moves
-      .sort((a,b) => Number(b.priceChangePercent) - Number(a.priceChangePercent))
-      .slice(0, 250); // scan reasonable set for early signals
+    const usdt = all24
+      .filter(t => t.symbol && t.symbol.endsWith("USDT"))
+      .map(t => ({
+        symbol: t.symbol,
+        vol24: Number(t.quoteVolume || 0),
+        priceChangePercent: Number(t.priceChangePercent || 0)
+      }))
+      .sort((a, b) => b.vol24 - a.vol24);
+
+    if (!usdt.length) {
+      logv("[EARLY] no USDT tickers found");
+      return [];
+    }
+
+    // 🧠 chỉ quét top 20% volume đầu bảng
+    const topVolCut = Math.floor(usdt.length * 0.2);
+    const topVol = usdt.slice(0, topVolCut);
 
     const results = [];
-    for (const t of usdt) {
+    const btc1h = await getKlines("BTCUSDT", "1h", 100).catch(() => []);
+    const BTC_RSI = btc1h.length ? rsiFromArray(klinesCloseArray(btc1h), 14) : 50;
+
+    for (const t of topVol) {
       try {
-        // simple early heuristic: 1h vol spike vs avg24h_base and priceChange not already huge
-        const k1 = await getKlines(t.symbol, "1h", 24).catch(()=>[]);
-        if (!k1.length) continue;
+        const k1 = await getKlines(t.symbol, "1h", 100).catch(() => []);
+        const k4 = await getKlines(t.symbol, "4h", 100).catch(() => []);
+        if (!k1.length || !k4.length) continue;
+
+        const closes1 = klinesCloseArray(k1);
         const vols1 = klinesVolumeArray(k1);
-        const VolNow = Number(vols1[vols1.length - 1] || 0);
-        const avg24h_base = Number(t.baseVolume || 1) / 24;
-        const volRatio = avg24h_base ? VolNow / avg24h_base : 1;
-        const priceChange = Number(t.priceChangePercent || 0);
-        if (volRatio >= EARLY_VOL_MULT && priceChange <= EARLY_PRICE_CHANGE_MAX) {
-          results.push({ symbol: t.symbol, volRatio: Number(volRatio.toFixed(2)), priceChange, quoteVolume: t.quoteVolume, note: "Early volume spike", conf: Math.min(90, 50 + Math.round((volRatio - 1) * 10)) });
-        }
+        const closes4 = klinesCloseArray(k4);
+
+        // --- Chỉ giữ coin đang nén ---
+        const bb = bollingerWidth(closes4, 14, 2);
+        if (bb.width > 0.05) continue; // loại coin đã bung band
+
+        // --- RSI vùng gom (không quá nóng) ---
+        const RSI_H1 = rsiFromArray(closes1, 14);
+        if (RSI_H1 < 30 || RSI_H1 > 60) continue;
+
+        // --- Volume spike mạnh & thật ---
+        const avgVol = vols1.slice(-30, -5).reduce((a, b) => a + b, 0) / 25;
+        const volNow = vols1[vols1.length - 1];
+        const volRatio = avgVol ? volNow / avgVol : 1;
+        const volSpike = vols1.slice(-3).filter(v => v > avgVol * 2).length >= 2;
+        if (volRatio < 2.2 || !volSpike) continue;
+
+        // --- Giá chưa chạy quá xa ---
+        const chg = t.priceChangePercent;
+        if (chg < -12 || chg > 10) continue;
+
+        // --- BTC RSI phải ổn định ---
+        if (BTC_RSI < 45 || BTC_RSI > 70) continue;
+
+        const conf = Math.min(
+          50 +
+            (volRatio - 2) * 10 +
+            (60 - Math.abs(RSI_H1 - 45)) / 2 +
+            (0.06 - bb.width) * 500,
+          90
+        );
+
+        const msg = {
+          symbol: t.symbol,
+          quoteVolume: t.vol24,
+          priceChangePercent: chg,
+          note: "Smart Early Pump candidate",
+          conf,
+          RSI_H1,
+          volRatio,
+          bbWidth: bb.width,
+        };
+
+        results.push(msg);
+        logv(`[EARLY] ${t.symbol} | Conf ${conf.toFixed(1)}% | vol x${volRatio.toFixed(2)} | RSI ${RSI_H1.toFixed(1)} | BB ${bb.width.toFixed(3)}`);
       } catch (e) {
-        // continue
+        logv(`[EARLY] error ${t.symbol}: ${e.message}`);
       }
     }
-    results.sort((a,b) => b.conf - a.conf);
-    logv(`[EARLY] found ${results.length} early candidates`);
-    return results.slice(0, 30);
-  } catch (e) {
-    logv("[EARLY] error " + e.message);
+
+    // sắp xếp theo độ tin cậy
+    results.sort((a, b) => b.conf - a.conf);
+
+    if (results.length) {
+      const top = results[0];
+      await pushSignal("[EARLY]", top, top.conf);
+      logv(`[EARLY] pushed ${top.symbol} Conf=${top.conf}`);
+    } else {
+      logv("[EARLY] no early candidates");
+    }
+
+    return results;
+  } catch (err) {
+    logv("[EARLY] main error: " + err.message);
     return [];
   }
 }
-
 // ------------------ Learning Engine (basic integ) ------------------
 async function recordSignalLearning(item) {
   try {
