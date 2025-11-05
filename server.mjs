@@ -1,4 +1,4 @@
-k// server_full_no_trim_v1.mjs
+// server_full_no_trim_v1.mjs
 // SPOT MASTER AI - Full single-file build
 // - PreBreakout (real-data), Early Pump Detector, Spot/Golden routing
 // - Auto-rotate Binance API mirrors (handles 429/451/403/5xx)
