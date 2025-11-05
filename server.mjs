@@ -256,12 +256,32 @@ async function sendTelegram(text) {
     logv(`[TELEGRAM TEST] status ${t.status}`);
     // ---------------------------------------------------
 
-    const res = await fetch(mainUrl, {
+    let res;
+try {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 7000); // timeout 7s
+  res = await fetch(mainUrl, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+    signal: controller.signal
+  });
+  clearTimeout(timeout);
+} catch (err) {
+  logv(`[TELEGRAM] fetch error: ${err.message} → retry via proxy...`);
+  const proxyUrl = `https://api-tg.vercel.app/bot${TELEGRAM_TOKEN}/sendMessage`;
+  try {
+    await fetch(proxyUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(payload)
     });
-
+    logv("[TELEGRAM] proxy retry success ✅");
+  } catch (e2) {
+    logv("[TELEGRAM] proxy retry failed ❌ " + e2.message);
+  }
+  return; // dừng hàm tại đây để không chạy xuống if (!res.ok)
+}
     if (!res.ok) {
       logv(`[TELEGRAM] send failed ${res.status}`);
 
