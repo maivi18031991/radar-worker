@@ -46,6 +46,35 @@ async function getKlines(symbol, interval = "1h", limit = 100) {
   logv(`[BINANCE] ❌ All mirrors failed fetching klines for ${symbol}`);
   return [];
 }
+// --- Utility: fetch 24h ticker data from Binance
+async function get24hTickers() {
+  const urls = [
+    "https://api.binance.com/api/v3/ticker/24hr",
+    "https://api1.binance.com/api/v3/ticker/24hr",
+    "https://api-gw.binance.vision/api/v3/ticker/24hr",
+    "https://data-api.binance.vision/api/v3/ticker/24hr"
+  ];
+
+  for (let url of urls) {
+    try {
+      const res = await fetch(url);
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          logv(`[BINANCE] ✅ Mirror OK (${url}) – ${data.length} tickers`);
+          return data;
+        }
+      } else {
+        logv(`[BINANCE] Mirror ${url} failed: status ${res.status}`);
+      }
+    } catch (e) {
+      logv(`[BINANCE] Mirror ${url} error: ${e.message}`);
+    }
+  }
+
+  logv(`[BINANCE] ❌ All mirrors failed fetching 24h tickers`);
+  return [];
+}
 // ---------- CONFIG ----------
 // === Full mirror list (v3.8 anti-451) ===
 const MIRRORS_DEFAULT = [
