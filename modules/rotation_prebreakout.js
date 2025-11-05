@@ -1,60 +1,90 @@
-// rotation_prebreakout.js
-// ✅ Version 4.1 — fully compatible with Spot Master AI v3.9 server
-// Features:
-//  - Multi-endpoint Binance API rotation (anti-block)
-//  - Local candle cache (avoid rate-limit)
-//  - Full async + auto retry
-//  - Compatible with hyper_spikes + learning engine
+/// --- rotation_prebreakout.js ---
+// Spot Master AI v4.1 — Pre-Breakout Radar Module
+// ✅ Multi-endpoint Binance API rotation
+// ✅ Local candle cache
+// ✅ Auto retry + rate-limit avoidance
+// ✅ Hyper spikes + learning integration
+// ✅ Render-compatible (HTTP keep-alive)
 
-import fs from "fs/promises";
+// Requires Node >=16
+// npm i node-fetch
+
+import fs from "fs";
+import fsPromises from "fs/promises";
 import path from "path";
 import fetchNode from "node-fetch";
-const fetch = (global.fetch || fetchNode);
+const fetch = global.fetch || fetchNode;
+import http from "http";
 
 // ---------- CONFIG ----------
-// === Full mirror list (v3.8 anti-451) ===
 const MIRRORS_DEFAULT = [
-  "https://api.binance.me",             // global mirror (preferred)
+  "https://api.binance.me",
   "https://api1.binance.me",
   "https://api3.binance.me",
   "https://api4.binance.me",
   "https://api1.binance.com",
   "https://api3.binance.com",
   "https://api4.binance.com",
-  "https://api.binance.us",             // ✅ bypass 451 (US mirror)
-  "https://data-api.binance.vision"     // ✅ open data proxy
+  "https://api.binance.us",
+  "https://data-api.binance.vision"
 ];
+
+// ---------- API rotation (stable) ----------
+const BINANCE_MIRRORS =
+  (process.env.BINANCE_MIRRORS && process.env.BINANCE_MIRRORS.split(",")) ||
+  MIRRORS_DEFAULT;
+
 let apiIndex = 0;
-function currentApi() { return API_LIST[apiIndex % API_LIST.length]; }
-function rotateApi() {
-  apiIndex = (apiIndex + 1) % API_LIST.length;
-  console.log(`[CACHE] 🔁 Mirror switched to: ${currentApi()}`);
+function currentAPI() {
+  if (!Array.isArray(BINANCE_MIRRORS) || BINANCE_MIRRORS.length === 0)
+    return MIRRORS_DEFAULT[0];
+  return BINANCE_MIRRORS[apiIndex % BINANCE_MIRRORS.length];
 }
+function rotateAPI() {
+  if (!Array.isArray(BINANCE_MIRRORS) || BINANCE_MIRRORS.length === 0) {
+    apiIndex = (apiIndex + 1) % MIRRORS_DEFAULT.length;
+    console.log(`[PRE] 🔁 Mirror switched to ${MIRRORS_DEFAULT[apiIndex]}`);
+    return;
+  }
+  apiIndex = (apiIndex + 1) % BINANCE_MIRRORS.length;
+  console.log(`[PRE] 🔁 Mirror switched to ${currentAPI()}`);
+}
+
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || "";
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "";
+const PRIMARY_URL = process.env.PRIMARY_URL || "";
+const KEEP_ALIVE_INTERVAL_MIN = Number(process.env.KEEP_ALIVE_INTERVAL_MIN || 10);
+const SCAN_INTERVAL_MS = 30 * 1000;
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const HYPER_FILE = path.join(DATA_DIR, "hyper_spikes.json");
-const CACHE_FILE = path.join(DATA_DIR, "cache_candles.json");
+const LEARN_FILE = path.join(DATA_DIR, "learning.json");
+const CACHE_FILE = path.join(DATA_DIR, "cache.json");
+
+// ---------- Thresholds ----------
 const MIN_VOL24H = 5_000_000;
 const MAX_TICKERS = 120;
 const CONF_THRESHOLD_SEND = 70;
 const HYPER_SPIKE_THRESHOLD = 85;
 const KLINES_LIMIT = 200;
 
-// ---------- Local Candle Cache ----------
+// ---------- Cache Utils ----------
 async function readCache() {
   try {
-    const txt = await fs.readFile(CACHE_FILE, "utf8");
+    const txt = await fsPromises.readFile(CACHE_FILE, "utf8");
     return JSON.parse(txt || "{}");
   } catch {
     return {};
   }
 }
+
 async function writeCache(obj) {
   try {
-    await fs.mkdir(DATA_DIR, { recursive: true });
-    await fs.writeFile(CACHE_FILE, JSON.stringify(obj, null, 2), "utf8");
+    await fsPromises.mkdir(DATA_DIR, { recursive: true });
+    await fsPromises.writeFile(CACHE_FILE, JSON.stringify(obj, null, 2), "utf8");
   } catch {}
 }
+
 async function getCached(symbol, interval) {
   const cache = await readCache();
   const key = `${symbol}_${interval}`;
@@ -64,6 +94,7 @@ async function getCached(symbol, interval) {
   }
   return null;
 }
+
 async function setCached(symbol, interval, data) {
   const cache = await readCache();
   cache[`${symbol}_${interval}`] = { ts: Date.now(), data };
@@ -71,27 +102,26 @@ async function setCached(symbol, interval, data) {
 }
 
 // ---------- Safe Fetch with Retry ----------
-async function safeFetch(url, label = "BINANCE", retries = 2) {
-  for (let i = 0; i <= retries; i++) {
+async function safeFetch(url, label = "BINANCE", retries = 3) {
+  for (let i = 0; i < retries; i++) {
     try {
-      const resp = await fetch(url, {
-        headers: { "User-Agent": "SpotMasterAI/3.9", "Accept": "application/json" },
+      const res = await fetch(`${currentAPI()}${url}`, {
+        headers: { "User-Agent": "SpotMasterAI/4.1" },
         timeout: 8000
       });
-      if (!resp.ok) {
-        console.error(`[${label}] Error ${resp.status}`);
-        if (resp.status === 403 || resp.status === 429) rotateApi();
-        await new Promise(r => setTimeout(r, 400 * (i + 1)));
+      if (!res.ok) {
+        if (res.status === 403 || res.status === 429) rotateAPI();
+        await new Promise(r => setTimeout(r, 300 * (i + 1)));
         continue;
       }
-      return await resp.json();
+      return await res.json();
     } catch (err) {
-      console.error(`[${label}] fetch fail ${err.message}`);
-      rotateApi();
-      await new Promise(r => setTimeout(r, 400 * (i + 1)));
+      console.warn(`[${label}] ${currentAPI()} fail:`, err.message);
+      rotateAPI();
+      await new Promise(r => setTimeout(r, 300 * (i + 1)));
     }
   }
-  console.error(`[${label}] failed after ${retries + 1} attempts`);
+  console.error(`[${label}] ❌ all mirrors failed`);
   return null;
 }
 
@@ -101,204 +131,142 @@ function sma(arr, n) {
   const slice = arr.slice(-n);
   return slice.reduce((s, v) => s + v, 0) / slice.length;
 }
+
 function stddev(arr, n) {
   const slice = arr.slice(-n);
   const m = sma(slice, slice.length);
   const v = slice.reduce((s, x) => s + (x - m) ** 2, 0) / slice.length;
   return Math.sqrt(v);
 }
-function bollingerWidth(closeArr, period = 14, mult = 2) {
+
+function bollingerWidth(closeArr, period = 20, mult = 2) {
   const mb = sma(closeArr, period);
   const sd = stddev(closeArr, period);
-  const up = mb + mult * sd;
-  const dn = mb - mult * sd;
-  const width = (up - dn) / (mb || 1);
-  return { mb, up, dn, width };
+  return (2 * mult * sd) / (mb || 1);
 }
-function rsiFromArray(closes, period = 14) {
-  if (closes.length < period + 1) return NaN;
+
+function rsi(closes, period = 14) {
+  if (closes.length < period + 1) return 50;
   let gains = 0, losses = 0;
   for (let i = closes.length - period; i < closes.length; i++) {
     const diff = closes[i] - closes[i - 1];
-    if (diff >= 0) gains += diff; else losses += Math.abs(diff);
+    if (diff > 0) gains += diff;
+    else losses -= diff;
   }
   const avgGain = gains / period;
   const avgLoss = losses / period;
   if (avgLoss === 0) return 100;
   const rs = avgGain / avgLoss;
-  return 100 - (100 / (1 + rs));
+  return 100 - 100 / (1 + rs);
 }
 
-// ---------- File Helpers ----------
-async function ensureDataDir() {
-  try { await fs.mkdir(DATA_DIR, { recursive: true }); } catch {}
-}
+// ---------- Hyper Spike Utils ----------
 async function readHyperSpikes() {
   try {
-    const txt = await fs.readFile(HYPER_FILE, "utf8");
+    const txt = await fsPromises.readFile(HYPER_FILE, "utf8");
     return JSON.parse(txt || "[]");
-  } catch { return []; }
-}
-async function writeHyperSpikes(arr) {
-  await ensureDataDir();
-  await fs.writeFile(HYPER_FILE, JSON.stringify(arr, null, 2), "utf8");
-}
-
-// ---------- Binance Data Fetchers ----------
-// ---------- Binance Data Fetchers (Smart Retry + Mirror Rotation) ----------
-async function get24hTicker() {
-  const MAX_ATTEMPTS = MIRRORS_DEFAULT.length;
-  let attempt = 0;
-
-  while (attempt < MAX_ATTEMPTS) {
-    const base = currentApi();
-    const url = `${base}/api/v3/ticker/24hr`;
-    console.log(`[PREBREAKOUT] Fetching 24h ticker from ${base} (try ${attempt + 1}/${MAX_ATTEMPTS})`);
-
-    try {
-      const resp = await fetch(url, {
-        headers: { "User-Agent": "SpotMaster-RadarBot" },
-        timeout: 8000
-      });
-
-      if (resp.ok) {
-        const data = await resp.json();
-        console.log(`[PREBREAKOUT] ✅ 24h ticker loaded from ${base}`);
-        return data;
-      }
-
-      console.warn(`[PREBREAKOUT] ⚠️ ${base} returned ${resp.status}`);
-
-      // Nếu bị chặn hoặc quá tải → chuyển mirror
-      if (resp.status === 451 || resp.status === 403 || resp.status === 429) {
-        rotateApi();
-        await new Promise(r => setTimeout(r, 1500));
-      } else {
-        // Nếu lỗi khác thì thử lại nhanh hơn
-        await new Promise(r => setTimeout(r, 500));
-      }
-
-    } catch (err) {
-      console.error(`[PREBREAKOUT] ❌ Fetch failed from ${base}:`, err.message);
-      rotateApi();
-      await new Promise(r => setTimeout(r, 2000));
-    }
-
-    attempt++;
+  } catch {
+    return [];
   }
-
-  console.error(`[PREBREAKOUT] ❌ All Binance mirrors failed after ${MAX_ATTEMPTS} attempts.`);
-  return null;
 }
-async function getKlines(symbol, interval = "1h", limit = KLINES_LIMIT) {
+
+async function writeHyperSpikes(arr) {
+  await fsPromises.mkdir(DATA_DIR, { recursive: true });
+  await fsPromises.writeFile(HYPER_FILE, JSON.stringify(arr, null, 2), "utf8");
+}
+
+// ---------- Fetch Binance Data ----------
+async function get24hTicker() {
+  return await safeFetch("/api/v3/ticker/24hr", "TICKERS");
+}
+
+async function getKlines(symbol, interval) {
   const cached = await getCached(symbol, interval);
   if (cached) return cached;
-  const res = await safeFetch(`${currentApi()}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`, "KLINES");
+  const res = await safeFetch(
+    `/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${KLINES_LIMIT}`,
+    symbol
+  );
   if (res && Array.isArray(res)) await setCached(symbol, interval, res);
   return res || [];
 }
 
-// ---------- Confidence ----------
-function computeConf({ RSI_H4, RSI_H1, VolNowRatio, BBWidth_H4, BTC_RSI }) {
-  let Conf = 0;
-  if (RSI_H4 > 45 && RSI_H4 < 60) Conf += 0.25;
-  if (RSI_H1 > 50 && RSI_H1 < 70) Conf += 0.20;
-  if (VolNowRatio > 1.8 && VolNowRatio < 3.5) Conf += 0.20;
-  if (BBWidth_H4 < 0.6) Conf += 0.15;
-  if (BTC_RSI > 35 && BTC_RSI < 65) Conf += 0.15;
-  if (RSI_H1 > 75 || VolNowRatio > 4.5) Conf -= 0.15;
-  Conf = Math.min(Math.max(Conf, 0), 1) * 100;
-  return Math.round(Conf);
-}
-function isCompressed({ price, mb, up, dn, bbWidth, MA20 }) {
-  if (bbWidth > 0.08) return false;
-  const nearMA20 = Math.abs(price - MA20) / (MA20 || 1) < 0.03;
-  const nearMiddle = Math.abs(price - mb) / (mb || 1) < 0.06;
-  const notNearUpper = price < (mb + (up - mb) * 0.7);
-  return (nearMA20 || nearMiddle) && notNearUpper;
+// ---------- Confidence Logic ----------
+function computeConf({ RSI_H4, RSI_H1, VolNorm, BBWidth }) {
+  let conf = 0;
+  if (RSI_H4 > 40 && RSI_H4 < 65) conf += 0.3;
+  if (RSI_H1 > 35 && RSI_H1 < 70) conf += 0.3;
+  if (VolNorm > 1.2) conf += 0.2;
+  if (BBWidth < 0.05) conf += 0.2;
+  return Math.min(conf, 1) * 100;
 }
 
-// ---------- Main Scan ----------
-export async function scanRotationFlow() {
+// ---------- Main Pre-Breakout Scan ----------
+export async function scanPreBreakout() {
   try {
-    const all24 = await get24hTicker();
-    if (!all24) return [];
+    const tickers = await get24hTicker();
+    if (!tickers) throw new Error("no ticker data");
 
-    const usdt = all24
-      .filter(t => t.symbol.endsWith("USDT"))
-      .map(t => ({ symbol: t.symbol, vol24: Number(t.quoteVolume || t.volume || 0), baseVolume: Number(t.volume || 0) }))
-      .filter(t => t.vol24 >= MIN_VOL24H)
-      .sort((a, b) => b.vol24 - a.vol24)
+    const top = tickers
+      .filter(t => t.symbol.endsWith("USDT") && Number(t.quoteVolume) > MIN_VOL24H)
+      .sort((a, b) => b.quoteVolume - a.quoteVolume)
       .slice(0, MAX_TICKERS);
 
-    if (!usdt.length) {
-      console.log("[ROTATION] No tickers pass min vol");
-      return [];
-    }
-
-    const results = [];
-    const hyper = await readHyperSpikes();
-    let BTC_RSI = 50;
-    try {
-      const btc1h = await getKlines("BTCUSDT", "1h", 100);
-      BTC_RSI = rsiFromArray(btc1h.map(k => Number(k[4])), 14);
-    } catch {}
-
-    for (const t of usdt) {
+    const candidates = [];
+    for (const t of top) {
       try {
-        const k4 = await getKlines(t.symbol, "4h", 100);
-        const k1 = await getKlines(t.symbol, "1h", 100);
-        if (!k4.length || !k1.length) continue;
+        const data = await getKlines(t.symbol, "1h");
+        if (!Array.isArray(data) || data.length < 50) continue;
 
-        const closes4 = k4.map(k => Number(k[4]));
-        const closes1 = k1.map(k => Number(k[4]));
-        const vols1 = k1.map(k => Number(k[5]));
+        const closes = data.map(k => Number(k[4]));
+        const vols = data.map(k => Number(k[5]));
+        const RSI_H1 = rsi(closes, 14);
+        const BB = bollingerWidth(closes, 20);
+        const VolNorm = vols.at(-1) / (sma(vols, 20) || 1);
+        const RSI_H4 = rsi(closes.slice(-80), 14);
 
-        const RSI_H4 = rsiFromArray(closes4, 14);
-        const RSI_H1 = rsiFromArray(closes1, 14);
-        const bb = bollingerWidth(closes4, 14, 2);
-        const BBWidth_H4 = bb.width;
-        const MA20 = sma(closes4, 20);
-        const VolNow = vols1.at(-1);
-        const avg24h = t.baseVolume / 24;
-        const VolNowRatio = avg24h ? VolNow / avg24h : 1;
-        const price = closes1.at(-1);
-        const Conf = computeConf({ RSI_H4, RSI_H1, VolNowRatio, BBWidth_H4, BTC_RSI });
-        const compressed = isCompressed({ price, mb: bb.mb, up: bb.up, dn: bb.dn, bbWidth: BBWidth_H4, MA20 });
+        const conf = computeConf({ RSI_H4, RSI_H1, VolNorm, BBWidth: BB });
 
-        const res = { symbol: t.symbol, price, RSI_H4, RSI_H1, BBWidth_H4, VolNowRatio, Conf, compressed };
-
-        if (Conf >= CONF_THRESHOLD_SEND && compressed)
-          console.log(`[PREBREAKOUT] ${t.symbol} Conf=${Conf}`);
-        if (Conf >= HYPER_SPIKE_THRESHOLD && compressed)
-          hyper.push({ ...res, ts: Date.now() });
-
-        results.push(res);
-      } catch (e) {
-        console.log("[ROTATION] err for", t.symbol, e.message);
+        if (conf >= CONF_THRESHOLD_SEND) {
+          candidates.push({
+            symbol: t.symbol,
+            conf: Math.round(conf),
+            RSI_H1,
+            RSI_H4,
+            BBWidth: BB,
+            VolNorm,
+          });
+        }
+      } catch (err) {
+        console.warn("[PRE] skip", t.symbol, err.message);
       }
     }
 
-    if (hyper.length) await writeHyperSpikes(hyper.slice(-500));
-    results.sort((a, b) => b.Conf - a.Conf);
-    console.log(`[ROTATION] scanned ${results.length} symbols, top: ${results[0]?.symbol || "none"} ${results[0]?.Conf || 0}%`);
-    return results;
-
+    candidates.sort((a, b) => b.conf - a.conf);
+    console.log(`[PRE] ✅ ${candidates.length} setups detected`);
+    return candidates;
   } catch (err) {
-    console.error("[ROTATION] main error:", err.message);
+    console.error("[PRE] Error:", err.message);
     return [];
   }
 }
 
-export async function scanPreBreakout() {
-  try {
-    const data = await scanRotationFlow();
-    if (!Array.isArray(data)) return [];
-    const valid = data.filter(x => x.symbol && x.Conf >= 60);
-    console.log(`[PREBREAKOUT] xuất ${valid.length} tín hiệu hợp lệ`);
-    return valid;
-  } catch (e) {
-    console.error("[PREBREAKOUT] lỗi:", e.message);
-    return [];
-  }
+// ---------- Keep-alive for Render ----------
+const PORT = process.env.PORT || 10000;
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("✅ Radar Worker running fine");
+});
+server.listen(PORT, () => {
+  console.log(`[RENDER FIX] Listening on port ${PORT}`);
+});
+
+// ping to PRIMARY_URL to prevent sleeping
+if (PRIMARY_URL) {
+  setInterval(() => {
+    try {
+      fetch(PRIMARY_URL);
+      console.log("[KEEPALIVE] ping sent to PRIMARY_URL");
+    } catch {}
+  }, KEEP_ALIVE_INTERVAL_MIN * 60 * 1000);
 }
