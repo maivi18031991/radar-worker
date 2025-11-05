@@ -13,10 +13,9 @@ k// server_full_no_trim_v1.mjs
 import fs from "fs";
 import fsPromises from "fs/promises";
 import path from "path";
+import http from "http";
 import fetchNode from "node-fetch"; // keep for Node envs
 const fetch = (global.fetch || fetchNode);
-// === Import analysis modules ===
-import http from "http";
 // ---------- CONFIG ----------
 // === Full mirror list (v3.8 anti-451) ===
 const MIRRORS_DEFAULT = [
