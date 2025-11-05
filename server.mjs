@@ -241,7 +241,12 @@ async function sendTelegram(text) {
   }
 
   const mainUrl = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
-  const payload = { chat_id: TELEGRAM_CHAT_ID, text, parse_mode: "HTML", disable_web_page_preview: true };
+  const payload = {
+    chat_id: TELEGRAM_CHAT_ID,
+    text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true
+  };
 
   try {
     // --- kiểm tra Telegram token có hoạt động không ---
@@ -250,7 +255,6 @@ async function sendTelegram(text) {
     logv(`[TELEGRAM TEST] status ${t.status}`);
     // ---------------------------------------------------
 
-    // Gửi chính qua Telegram API
     const res = await fetch(mainUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -260,7 +264,7 @@ async function sendTelegram(text) {
     if (!res.ok) {
       logv(`[TELEGRAM] send failed ${res.status}`);
 
-      // nếu bị block hoặc timeout → fallback sang proxy
+      // nếu bị block hoặc timeout → fallback sang proxy an toàn
       if ([403, 404, 408, 429, 502, 503, 504].includes(res.status)) {
         const proxyUrl = `https://api-tg.vercel.app/bot${TELEGRAM_TOKEN}/sendMessage`;
         try {
@@ -279,7 +283,10 @@ async function sendTelegram(text) {
     logv("[TELEGRAM] error " + e.message);
   }
 }
-// Unified push
+
+// ------------------ Unified push (with anti-spam) ------------------
+let lastPush = {}; // cache tín hiệu đã gửi để tránh spam
+
 async function pushSignal(tag, data, conf = 70) {
   try {
     if (!data || !data.symbol) return;
@@ -287,6 +294,18 @@ async function pushSignal(tag, data, conf = 70) {
     const vol = (data.quoteVolume || data.VolNow || 0).toLocaleString();
     const chg = data.priceChangePercent || data.change24h || 0;
     const note = data.note || "Auto signal";
+
+    const key = `${tag}_${sym}`;
+    const now = Date.now();
+
+    // --- chống spam: nếu đã gửi trong vòng 5 phút thì bỏ qua ---
+    if (lastPush[key] && now - lastPush[key] < 5 * 60 * 1000) {
+      logv(`[PUSH] skip duplicate ${sym} (sent <5min)`);
+      return;
+    }
+    lastPush[key] = now;
+    // ------------------------------------------------------------
+
     const msg = `
 <b>${tag}</b> ${sym}USDT
 Δ24h: <b>${(typeof chg === "number" ? chg.toFixed(2) : Number(chg || 0).toFixed(2))}%</b> | Conf: ${conf}%
@@ -294,13 +313,13 @@ Vol: ${vol}
 Note: ${note}
 Time: ${new Date().toLocaleString("en-GB", { timeZone: "Asia/Ho_Chi_Minh" })}
 `;
+
     if (TELEGRAM_TOKEN && TELEGRAM_CHAT_ID) await sendTelegram(msg);
     logv("[PUSH] " + sym + " " + (typeof chg === "number" ? chg.toFixed(2) : Number(chg || 0).toFixed(2)) + "% sent");
   } catch (err) {
     console.error("[pushSignal ERROR]", err.message || err);
   }
 }
-
 // ------------------ PreBreakout core (rotation) ------------------
 async function get24hTickers() {
   // returns array
