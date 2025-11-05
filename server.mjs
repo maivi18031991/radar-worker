@@ -19,12 +19,11 @@ import fetchNode from "node-fetch";
 const fetch = (global.fetch || fetchNode);
 const LOG_DEBUG = process.env.LOG_DEBUG === "true";
 
-// --- Utility: fetch kline (candlestick) data from Binance
+// --- Utility: fetch klines (candlestick data)
 async function getKlines(symbol, interval = "1h", limit = 100) {
   const urls = [
-    `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`,
-    `https://api1.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`,
-    `https://api-gw.binance.vision/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`
+    `https://binance-proxy.mira.workers.dev/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`,
+    `https://binance-proxy.mira.workers.dev/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`
   ];
 
   for (let url of urls) {
