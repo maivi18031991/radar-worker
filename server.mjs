@@ -644,6 +644,11 @@ const server = http.createServer((req, res) => {
 server.listen(PORT, () => {
   console.log(`[RENDER FIX] Web listener active on port ${PORT}`);
 });
+// === KEEP PROCESS ALIVE FOR RENDER ===
+setInterval(() => {
+  console.log(`[KEEPALIVE] Server still running at ${new Date().toLocaleTimeString()}`);
+}, 10 * 60 * 1000); // 10 phút ping 1 lần để không bị exit
+process.stdin.resume(); // 🔒 giữ process luôn mở
 
 // === KEEP BOT ALIVE (loop background tasks) ===
 setInterval(() => {
