@@ -16,6 +16,7 @@ import path from "path";
 import http from "http";
 import fetchNode from "node-fetch"; // keep for Node envs
 const fetch = (global.fetch || fetchNode);
+const LOG_DEBUG = process.env.LOG_DEBUG === "true";
 // ---------- CONFIG ----------
 // === Full mirror list (v3.8 anti-451) ===
 const MIRRORS_DEFAULT = [
@@ -346,6 +347,7 @@ async function scanRotationFlow() {
       logv("[ROTATION] no USDT tickers pass min vol");
       return [];
     }
+    if (LOG_DEBUG) logv(`[DEBUG] Scanning ${usdt.length} tickers with minVol ${MIN_VOL24H}`);
     const results = [];
     const hyper = await readHyperSpikes();
     // btc rsi
@@ -359,6 +361,7 @@ async function scanRotationFlow() {
         const k4 = await getKlines(t.symbol, "4h", 100).catch(()=>[]);
         const k1 = await getKlines(t.symbol, "1h", 100).catch(()=>[]);
         if (!k4.length || !k1.length) continue;
+        if (LOG_DEBUG) logv(`[DEBUG] Checking ${t.symbol} | 24hVol: ${t.vol24.toFixed(0)} | Δ${t.priceChangePercent}%`);
         const closes4 = klinesCloseArray(k4);
         const closes1 = klinesCloseArray(k1);
         const vols1 = klinesVolumeArray(k1);
@@ -422,6 +425,7 @@ async function scanPreBreakout() {
 async function scanEarlyPump() {
   try {
     const all24 = await get24hTickers();
+    if (LOG_DEBUG) logv(`[DEBUG] Starting Early Pump scan...`);
     const usdt = all24.filter(t => t.symbol && t.symbol.endsWith("USDT"))
       .map(t => ({ symbol: t.symbol, vol24: Number(t.quoteVolume || t.volume || 0), baseVolume: Number(t.volume || 0), priceChangePercent: Number(t.priceChangePercent || 0), quoteVolume: Number(t.quoteVolume || 0) }))
       .filter(t => t.vol24 >= 200_000) // lower threshold so early can see smaller but real moves
