@@ -215,16 +215,41 @@ function klinesCloseArray(klines) { return klines.map(k => Number(k[4])); }
 function klinesVolumeArray(klines) { return klines.map(k => Number(k[5])); }
 
 // ------------------ Confidence & compression ------------------
+// ------------------ Confidence Scoring (Smart Unified Ver.) ------------------
 function computeConf({ RSI_H4, RSI_H1, VolNowRatio, BBWidth_H4, BTC_RSI }) {
-  let Conf = 0;
-  if (RSI_H4 > 45 && RSI_H4 < 60) Conf += 0.25;
-  if (RSI_H1 > 50 && RSI_H1 < 70) Conf += 0.20;
-  if (VolNowRatio > 1.8 && VolNowRatio < 3.5) Conf += 0.20;
-  if (BBWidth_H4 < 0.6 * 1.0) Conf += 0.15;
-  if (BTC_RSI > 35 && BTC_RSI < 65) Conf += 0.15;
-  if (RSI_H1 > 75 || VolNowRatio > 4.5) Conf -= 0.15;
-  Conf = Math.min(Math.max(Conf, 0), 1) * 100;
-  return Math.round(Conf);
+  let score = 0;
+
+  // 🎯 1️⃣ RSI — phản ánh sức bật
+  if (RSI_H4 >= 35 && RSI_H4 <= 55) score += 20;     // vùng gom lý tưởng
+  else if (RSI_H4 > 55 && RSI_H4 <= 65) score += 10; // có lực nhẹ
+  else if (RSI_H4 < 30 || RSI_H4 > 75) score -= 10;  // quá yếu / quá nóng
+
+  if (RSI_H1 >= 35 && RSI_H1 <= 60) score += 15;
+  else if (RSI_H1 > 60 && RSI_H1 <= 75) score += 5;
+  else score -= 5;
+
+  // 💰 2️⃣ Volume Ratio — sức mạnh gom
+  if (VolNowRatio >= 2 && VolNowRatio < 3) score += 15;
+  else if (VolNowRatio >= 3 && VolNowRatio < 5) score += 25;
+  else if (VolNowRatio >= 5) score += 30; // vol bất thường cực mạnh
+  else if (VolNowRatio < 1.5) score -= 10;
+
+  // 🌀 3️⃣ Bollinger Width — độ nén
+  if (BBWidth_H4 < 0.05) score += 20; // nén mạnh
+  else if (BBWidth_H4 < 0.08) score += 10;
+  else score -= 5;
+
+  // 🧭 4️⃣ BTC RSI — xu hướng chung thị trường
+  if (BTC_RSI >= 50 && BTC_RSI <= 65) score += 10; // thị trường khỏe vừa
+  else if (BTC_RSI >= 35 && BTC_RSI < 50) score += 5; // tạm ổn
+  else score -= 5; // tránh khi BTC yếu hoặc quá nóng
+
+  // 🧮 Chuẩn hóa về 0–100
+  score = Math.max(0, Math.min(100, score));
+
+  // 🎯 Độ tin cậy tổng hợp
+  const conf = Math.round(score);
+  return conf;
 }
 function isCompressed({ price, mb, up, dn, bbWidth, MA20 }) {
   if (bbWidth > 0.08) return false;
