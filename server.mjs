@@ -466,10 +466,12 @@ async function scanPreBreakout() {
   }
 }
 
-// ------------------ Smart Early Pump Detector ------------------
+// ------------------ Smart Early Pump Detector vFinal ------------------
 async function scanEarlyPump() {
   try {
     logv("[EARLY] Starting Smart Early Pump scan...");
+
+    // Lấy dữ liệu 24h
     const all24 = await get24hTickers();
     const usdt = all24
       .filter(t => t.symbol && t.symbol.endsWith("USDT"))
@@ -485,13 +487,18 @@ async function scanEarlyPump() {
       return [];
     }
 
-    // 🧠 chỉ quét top 20% volume đầu bảng
+    // Chỉ quét top 20% volume đầu bảng
     const topVolCut = Math.floor(usdt.length * 0.2);
     const topVol = usdt.slice(0, topVolCut);
 
-    const results = [];
+    // Bộ nhớ chống trùng cảnh báo
+    const alertCache = new Map(); // { symbol: timestamp }
+
+    // RSI của BTC để lọc thị trường
     const btc1h = await getKlines("BTCUSDT", "1h", 100).catch(() => []);
     const BTC_RSI = btc1h.length ? rsiFromArray(klinesCloseArray(btc1h), 14) : 50;
+
+    const results = [];
 
     for (const t of topVol) {
       try {
@@ -503,28 +510,29 @@ async function scanEarlyPump() {
         const vols1 = klinesVolumeArray(k1);
         const closes4 = klinesCloseArray(k4);
 
-        // --- Chỉ giữ coin đang nén ---
+        // Bollinger Bands – chỉ giữ coin đang nén
         const bb = bollingerWidth(closes4, 14, 2);
-        if (bb.width > 0.05) continue; // loại coin đã bung band
+        if (bb.width > 0.05) continue; // coin đã bung band thì bỏ
 
-        // --- RSI vùng gom (không quá nóng) ---
+        // RSI H1 – vùng gom an toàn
         const RSI_H1 = rsiFromArray(closes1, 14);
         if (RSI_H1 < 30 || RSI_H1 > 60) continue;
 
-        // --- Volume spike mạnh & thật ---
+        // Volume spike thực – có dòng tiền gom
         const avgVol = vols1.slice(-30, -5).reduce((a, b) => a + b, 0) / 25;
         const volNow = vols1[vols1.length - 1];
         const volRatio = avgVol ? volNow / avgVol : 1;
         const volSpike = vols1.slice(-3).filter(v => v > avgVol * 2).length >= 2;
         if (volRatio < 2.2 || !volSpike) continue;
 
-        // --- Giá chưa chạy quá xa ---
+        // Giá chưa chạy quá xa
         const chg = t.priceChangePercent;
         if (chg < -12 || chg > 10) continue;
 
-        // --- BTC RSI phải ổn định ---
+        // BTC RSI phải trong vùng ổn định
         if (BTC_RSI < 45 || BTC_RSI > 70) continue;
 
+        // Tính độ tin cậy (Conf)
         const conf = Math.min(
           50 +
             (volRatio - 2) * 10 +
@@ -545,13 +553,20 @@ async function scanEarlyPump() {
         };
 
         results.push(msg);
-        // 🚨 Nếu tín hiệu đạt độ tin cậy cao thì gửi ngay cảnh báo
-if (conf >= 70) {
-  const entryLow = (chg - 1).toFixed(2);
-  const entryHigh = (chg + 1).toFixed(2);
-  const entryZone = `${entryLow}% → ${entryHigh}%`;
 
-  const alertMsg = `
+        // 🚨 Gửi cảnh báo ngay nếu đạt ngưỡng mạnh (Conf ≥ 70)
+        if (conf >= 70) {
+          const now = Date.now();
+          const lastAlert = alertCache.get(t.symbol) || 0;
+          const timeDiff = (now - lastAlert) / 1000 / 60; // phút
+
+          // chỉ gửi nếu chưa gửi trong 10 phút gần nhất
+          if (timeDiff > 10) {
+            const entryLow = (chg - 1).toFixed(2);
+            const entryHigh = (chg + 1).toFixed(2);
+            const entryZone = `${entryLow}% → ${entryHigh}%`;
+
+            const alertMsg = `
 <b>[EARLY ALERT]</b> ${t.symbol}
 Δ24h: <b>${chg.toFixed(2)}%</b> | Conf: ${conf.toFixed(0)}%
 Vol: ${volNow.toLocaleString()}
@@ -560,16 +575,22 @@ Note: Price entering smart accumulation band 🧠
 Time: ${new Date().toLocaleString("en-GB", { timeZone: "Asia/Ho_Chi_Minh" })}
 `;
 
-  await sendTelegram(alertMsg);
-  logv(`[ALERT] Sent immediate ${t.symbol} | Conf=${conf.toFixed(1)}`);
-}
+            await sendTelegram(alertMsg);
+            alertCache.set(t.symbol, now);
+            logv(`[ALERT] Sent immediate ${t.symbol} | Conf=${conf.toFixed(1)}`);
+          } else {
+            logv(`[ALERT] Skipped duplicate ${t.symbol}, last alert ${timeDiff.toFixed(1)}m ago`);
+          }
+        }
+
+        // Ghi log chi tiết
         logv(`[EARLY] ${t.symbol} | Conf ${conf.toFixed(1)}% | vol x${volRatio.toFixed(2)} | RSI ${RSI_H1.toFixed(1)} | BB ${bb.width.toFixed(3)}`);
       } catch (e) {
         logv(`[EARLY] error ${t.symbol}: ${e.message}`);
       }
     }
 
-    // sắp xếp theo độ tin cậy
+    // Sắp xếp theo độ tin cậy giảm dần
     results.sort((a, b) => b.conf - a.conf);
 
     if (results.length) {
