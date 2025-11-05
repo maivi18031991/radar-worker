@@ -623,7 +623,6 @@ if (PRIMARY_URL) {
 }
 
 // === RENDER FREE FIX (final keep-alive) ===
-import http from "http";
 
 const PORT = process.env.PORT || 10000;
 const server = http.createServer((req, res) => {
