@@ -49,14 +49,11 @@ async function getKlines(symbol, interval = "1h", limit = 100) {
 // --- Utility: fetch 24h ticker data
 async function get24hTickers() {
   const urls = [
-    "https://api.binance.com/api/v3/ticker/24hr",
-    "https://api1.binance.com/api/v3/ticker/24hr",
-    "https://api-gw.binance.vision/api/v3/ticker/24hr",
-    "https://data-api.binance.vision/api/v3/ticker/24hr",
-    // Proxy fallback
-    "https://binance-proxy.mira.workers.dev/api/v3/ticker/24hr"
+    "https://api1.binance.me/api/v3/ticker/24hr",
+    "https://api-gw.binance.sbs/api/v3/ticker/24hr",
+    "https://api-gw.binance.me/api/v3/ticker/24hr",
+    "https://api.binance.me/api/v3/ticker/24hr"
   ];
-
   for (let url of urls) {
     try {
       const res = await fetch(url);
