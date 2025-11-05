@@ -239,19 +239,46 @@ async function sendTelegram(text) {
     logv("[TELEGRAM] missing TOKEN/CHAT_ID");
     return;
   }
-  const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
+
+  const mainUrl = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
   const payload = { chat_id: TELEGRAM_CHAT_ID, text, parse_mode: "HTML", disable_web_page_preview: true };
+
   try {
-     const testUrl = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/getMe`;
-  const t = await fetch(testUrl);
-  logv(`[TELEGRAM TEST] status ${t.status}`);
-    const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
-    if (!res.ok) logv(`[TELEGRAM] send failed ${res.status}`);
+    // --- kiểm tra Telegram token có hoạt động không ---
+    const testUrl = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/getMe`;
+    const t = await fetch(testUrl);
+    logv(`[TELEGRAM TEST] status ${t.status}`);
+    // ---------------------------------------------------
+
+    // Gửi chính qua Telegram API
+    const res = await fetch(mainUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    if (!res.ok) {
+      logv(`[TELEGRAM] send failed ${res.status}`);
+
+      // nếu bị block hoặc timeout → fallback sang proxy
+      if ([403, 404, 408, 429, 502, 503, 504].includes(res.status)) {
+        const proxyUrl = `https://api-tg.vercel.app/bot${TELEGRAM_TOKEN}/sendMessage`;
+        try {
+          const r2 = await fetch(proxyUrl, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(payload)
+          });
+          logv(`[TELEGRAM] fallback proxy ${r2.ok ? "✅ success" : "❌ failed"} (${r2.status})`);
+        } catch (e2) {
+          logv(`[TELEGRAM] proxy fetch error ${e2.message}`);
+        }
+      }
+    }
   } catch (e) {
     logv("[TELEGRAM] error " + e.message);
   }
 }
-
 // Unified push
 async function pushSignal(tag, data, conf = 70) {
   try {
