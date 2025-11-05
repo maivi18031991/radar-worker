@@ -799,40 +799,53 @@ setInterval(async () => {
 async function mainLoop() {
   logv("[MAIN] cycle started");
   try {
-    // Run PreBreakout scan
+    // --- Run PreBreakout scan ---
     const preList = await scanPreBreakout();
+
     if (preList && preList.length > 0) {
       for (const coin of preList) {
-        const conf = coin.Conf || coin.conf || 75;
-        // tag heuristics (could be improved by learning_engine)
-        const tag = coin.type === "IMF" ? "[FLOW]" : coin.type === "GOLDEN" ? "[GOLDEN]" : "[PRE]";
-        // push
+        const conf = coin.conf || coin.Conf || 70;
+        const tag = "[PRE]";
         await pushSignal(tag, coin, conf);
-        // record to learning engine with extra fields
-        await recordSignalLearning({ symbol: coin.symbol, price: coin.price, type: "PRE", conf, time: new Date().toISOString() });
+        await recordSignalLearning({ symbol: coin.symbol, type: "PRE" });
       }
-      logv(`[MAIN] ${preList.length} coins processed`);
+      logv(`[MAIN] ${preList.length} PreBreakout coins processed`);
     } else {
       logv("[MAIN] no breakout candidates found");
     }
 
-    // Early detector
+    // --- Run Early Pump scan ---
     const earlyList = await scanEarlyPump();
-    if (earlyList && earlyList.length) {
+
+    if (earlyList && earlyList.length > 0) {
       for (const e of earlyList) {
-        await pushSignal("[EARLY]", { symbol: e.symbol, priceChangePercent: e.priceChange, quoteVolume: e.quoteVolume, note: e.note }, e.conf);
-        await recordSignalLearning({ symbol: e.symbol, price: null, type: "EARLY", conf: e.conf, time: new Date().toISOString() });
+        await pushSignal("[EARLY]", e, e.conf);
+        await recordSignalLearning({ symbol: e.symbol, type: "EARLY" });
       }
-      logv(`[MAIN] EARLY ${earlyList.length} pushed`);
+      logv(`[MAIN] ${earlyList.length} Early Pump coins processed`);
+    } else {
+      logv("[MAIN] no early candidates found");
     }
 
+    // --- Optional: log trùng lặp Early + Pre ---
+    if (preList && earlyList) {
+      const preSymbols = preList.map(c => c.symbol);
+      const match = earlyList.filter(e => preSymbols.includes(e.symbol));
+      if (match.length > 0) {
+        for (const m of match) {
+          logv(`[MATCH] ${m.symbol} appears in both EARLY + PRE — strong confluence!`);
+        }
+      }
+    }
+
+    // --- Push summary top signals ---
+    await pushTopSignals(preList, "[PRE]");
+    await pushTopSignals(earlyList, "[EARLY]");
+
+    logv("[MAIN] cycle complete ✅");
   } catch (err) {
-    logv("[MAIN ERROR] " + (err?.message || err));
+    logv("[MAIN] error: " + err.message);
   }
-  // ✅ Auto push top signals each round
-await pushTopSignals(preList, "[PRE]");
-await pushTopSignals(earlyList, "[EARLY]");
-  logv("[MAIN] cycle complete");
 }
 // ------------------ Auto Prioritizer: chọn tín hiệu mạnh nhất ------------------
 async function pushTopSignals(list, tag = "[AUTO]") {
