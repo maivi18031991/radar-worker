@@ -103,56 +103,60 @@ function rotateBinanceAPI() {
   }
 }
 
-// safe fetch with intelligent rotate + retries
-async function safeFetchJSON(urlPath, label = "BINANCE", retries = 2, timeoutMs = 8000) {
-  let base = SELECTED_BINANCE || (await autoPickBinanceAPI());
+// === Safe fetch with intelligent rotate + retry ===
+async function safeFetchJSON(urlPath, label = "API", retries = 3) {
+  let base = SELECTED_BINANCE || (await autoSelectBinance());
+  const headers = { "User-Agent": "RadarWorker/1.0" };
+
   for (let attempt = 0; attempt <= retries; attempt++) {
     const url = urlPath.startsWith("http") ? urlPath : `${base}${urlPath}`;
+
     try {
-      const res = await fetch(url, { headers: { "User-Agent": "SpotMasterAI/3.6", "Accept": "application/json" }, timeout: timeoutMs });
-      if (!res) throw new Error("No response");
+      const res = await fetch(url, { headers });
+
+      if (!res) throw new Error("No response from fetch");
       if (!res.ok) {
-  const status = res.status;
-  logv(`[${label}] ${status} ${url}`);
+        const status = res.status;
 
-  if ([429, 451, 403, 502, 503, 504].includes(status)) {
-    logv(`[API] Detected blocked (${status}) → rotating endpoint...`);
-    rotateBinanceAPI();
+        // nếu bị chặn 451 hoặc lỗi 429 -> rotate endpoint
+        if ([429, 451, 403, 502, 503, 504].includes(status)) {
+          logv(`[API] Detected blocked (${status}), rotating...`);
+          rotateBinanceAPI();
 
-    // ✅ Nếu bị chặn 451 thì thử fallback qua vision
-    if (status === 451) {
-      try {
-        const alt = url.replace(base, "https://data-api.binance.vision");
-        const altRes = await fetch(alt, { headers: { "User-Agent": "SpotMasterAI/3.8" } });
-        if (altRes.ok) {
-          logv(`[API] ✅ fallback via vision API`);
-          return await altRes.json();
+          // nếu là 451 thì thử vision API
+          if (status === 451) {
+            try {
+              const alt = url.replace(base, "https://data-api.binance.vision");
+              const altRes = await fetch(alt, { headers });
+              if (altRes.ok) {
+                logv(`[API] ✅ vision fallback ok`);
+                return await altRes.json();
+              }
+            } catch (e2) {
+              logv(`[API] vision fallback failed: ${e2.message}`);
+            }
+          }
         }
-      } catch (e2) {
-        logv(`[API] vision fallback failed: ${e2.message}`);
-      }
-    }
-  }
 
-  await new Promise(r => setTimeout(r, 300 * (attempt + 1)));
-  continue;
-}
-        // otherwise try again after backoff
+        // đợi 300ms rồi thử lại
         await new Promise(r => setTimeout(r, 300 * (attempt + 1)));
         continue;
       }
+
+      // nếu OK thì parse JSON
       const j = await res.json();
       return j;
-    } catch (e) {
-      logv(`[${label}] fetch error for ${url}: ${e.message}`);
-      // rotate on network errors
-      base = rotateBinanceAPI();
+
+    } catch (err) {
+      logv(`[SAFEFETCH] Fetch failed for ${url}: ${err.message}`);
+      base = rotateBinanceAPI(); // thử mirror khác
       await new Promise(r => setTimeout(r, 300 * (attempt + 1)));
     }
   }
-  throw new Error(`${label} fetch failed after ${retries + 1} attempts`);
-}
 
+  // nếu vẫn thất bại sau retries lần
+  throw new Error(`${label} fetch failed after ${retries} retries`);
+}
 // ------------------ FS helpers ------------------
 async function ensureDataDir() {
   try { await fsPromises.mkdir(DATA_DIR, { recursive: true }); } catch (e) {}
