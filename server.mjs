@@ -1,4 +1,4 @@
-// server_full_no_trim_v1.mjs
+k// server_full_no_trim_v1.mjs
 // SPOT MASTER AI - Full single-file build
 // - PreBreakout (real-data), Early Pump Detector, Spot/Golden routing
 // - Auto-rotate Binance API mirrors (handles 429/451/403/5xx)
@@ -620,7 +620,6 @@ if (PRIMARY_URL) {
 
 // expose minimal HTTP healthcheck (optional)
 // --- Minimal HTTP healthcheck for Render ---
-import http from "http";
 
 const PORT = process.env.PORT || 10000;
 const server = http.createServer((req, res) => {
