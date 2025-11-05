@@ -39,7 +39,7 @@ async function get24hTickers() {
   for (let i = 0; i < MIRRORS.length; i++) {
     const url = MIRRORS[i];
     try {
-      const res = await fetch(url, { headers, timeout: 15000 });
+      const res = await fetch("https://binance-proxy.mira.workers.dev/ticker");
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data) && data.length > 0) {
