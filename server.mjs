@@ -19,17 +19,46 @@ import fetchNode from "node-fetch";
 const fetch = (global.fetch || fetchNode);
 const LOG_DEBUG = process.env.LOG_DEBUG === "true";
 
-// --- Utility: fetch 24h ticker data from Binance ---
+// --- Utility: fetch 24h ticker data from Binance (auto mirror & fallback) ---
 async function get24hTickers() {
-  try {
-    const res = await fetch("https://api.binance.com/api/v3/ticker/24hr");
-    if (!res.ok) throw new Error(`Failed to fetch tickers: ${res.status}`);
-    const data = await res.json();
-    return data;
-  } catch (e) {
-    logv("[BINANCE] error fetching 24h tickers: " + e.message);
-    return [];
+  const mirrorUrls = [
+    "https://api.binance.me/api/v3/ticker/24hr",
+    "https://api1.binance.me/api/v3/ticker/24hr",
+    "https://api2.binance.me/api/v3/ticker/24hr",
+    "https://api3.binance.me/api/v3/ticker/24hr",
+    "https://api-gw.binance.vision/api/v3/ticker/24hr"
+  ];
+
+  const headers = {
+    "User-Agent": "Mozilla/5.0 (compatible; SpotMasterAI/1.0; +https://binance.com)",
+    "Accept": "application/json"
+  };
+
+  let data = [];
+  let lastError = "";
+
+  for (const url of mirrorUrls) {
+    try {
+      const res = await fetch(url, { headers, timeout: 8000 });
+      if (res.ok) {
+        data = await res.json();
+        logv(`[API] mirror success ✅ (${url}) → ${data.length} tickers`);
+        break;
+      } else {
+        logv(`[API] mirror failed (${url}) ❌ status:${res.status}`);
+        lastError = res.status;
+      }
+    } catch (e) {
+      logv(`[API] mirror fetch error (${url}): ${e.message}`);
+      lastError = e.message;
+    }
   }
+
+  if (!data.length) {
+    logv(`[BINANCE] error fetching 24h tickers 🚫 (${lastError})`);
+  }
+
+  return data;
 }
 // ---------- CONFIG ----------
 // === Full mirror list (v3.8 anti-451) ===
