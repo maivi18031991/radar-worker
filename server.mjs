@@ -15,7 +15,9 @@ import fsPromises from "fs/promises";
 import path from "path";
 import fetchNode from "node-fetch"; // keep for Node envs
 const fetch = (global.fetch || fetchNode);
-
+// === Import analysis modules ===
+import { scanEarlyPump } from "./modules/early_pump_detector.js";
+import { scanPreBreakout } from "./modules/rotation_prebreakout.js";
 // ---------- CONFIG ----------
 // === Full mirror list (v3.8 anti-451) ===
 const MIRRORS_DEFAULT = [
