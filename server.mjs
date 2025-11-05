@@ -19,45 +19,31 @@ import fetchNode from "node-fetch";
 const fetch = (global.fetch || fetchNode);
 const LOG_DEBUG = process.env.LOG_DEBUG === "true";
 
-// --- Utility: fetch 24h ticker data from Binance (retry + fallback)
-async function get24hTickers() {
-  const MIRRORS = [
-    "https://api.binance.com/api/v3/ticker/24hr",
-    "https://api1.binance.com/api/v3/ticker/24hr",
-    "https://api3.binance.com/api/v3/ticker/24hr",
-    "https://api-gw.binance.vision/api/v3/ticker/24hr",
-    "https://data-api.binance.vision/api/v3/ticker/24hr"
+// --- Utility: fetch kline (candlestick) data from Binance
+async function getKlines(symbol, interval = "1h", limit = 100) {
+  const urls = [
+    `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`,
+    `https://api1.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`,
+    `https://api-gw.binance.vision/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`
   ];
 
-  const headers = {
-    "User-Agent": "Mozilla/5.0 (compatible; RadarBot/1.0; +https://github.com/maivi18031991)",
-    "Accept": "application/json,text/plain,*/*",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive"
-  };
-
-  for (let i = 0; i < MIRRORS.length; i++) {
-    const url = MIRRORS[i];
+  for (let url of urls) {
     try {
-      const res = await fetch("https://binance-proxy.mira.workers.dev/ticker");
+      const res = await fetch(url);
       if (res.ok) {
         const data = await res.json();
-        if (Array.isArray(data) && data.length > 0) {
-          logv(`[BINANCE] ✅ Mirror OK (${url}) — ${data.length} tickers`);
+        if (Array.isArray(data)) {
           return data;
         }
       } else {
-        logv(`[BINANCE] Mirror ${url} failed: status ${res.status}`);
+        logv(`[BINANCE] Kline fetch failed (${url}) status: ${res.status}`);
       }
-    } catch (err) {
-      logv(`[BINANCE] Mirror ${url} error: ${err.message}`);
+    } catch (e) {
+      logv(`[BINANCE] Kline error (${url}): ${e.message}`);
     }
-
-    // Wait 500ms before next mirror
-    await new Promise(r => setTimeout(r, 500));
   }
 
-  logv("[BINANCE] ❌ All mirrors failed fetching 24h tickers");
+  logv(`[BINANCE] ❌ All mirrors failed fetching klines for ${symbol}`);
   return [];
 }
 // ---------- CONFIG ----------
